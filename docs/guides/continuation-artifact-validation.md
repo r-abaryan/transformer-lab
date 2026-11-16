@@ -45,13 +45,44 @@ and checks each against the recorded gain. It does not silently substitute one c
 or change a failed repair decision into a successful one. This equivalence is specific
 to this dataset and must not be generalized to future mixed cohorts.
 
+## Boundary tests and hosted verification
+
+```text
+python -m unittest discover -s tests -p test_continuation_validation_boundaries.py -v
+```
+
+The added boundary suite directly tests the unrounded benefit predicate at 0.10 and
+its adjacent representable floats, and checks that failed repair blocks benefit.
+End-to-end fixtures separately check gains computed by subtracting two accuracies;
+for example, `1.0 - 0.9` is below the float literal `0.10` and is not rounded up.
+Loss and accuracy cross-checks exercise both perturbation signs inside and outside
+1e-10, nearest serialized values straddling that boundary, and the inclusive comparator
+at exactly 1e-10. Boundary fixtures reuse the schema; original structural tests remain
+separate and unchanged.
+
+The [dedicated workflow](../../.github/workflows/continuation-validation.yml) runs the
+original structural tests, the new boundary tests, and the validator over the complete
+committed artifacts on hosted Ubuntu and native Windows with Python 3.12. It requires
+successful commands, 8 runs, 328 rows, zero training and matching input hashes. It also
+compares before/after hashes of the three artifact files and original producer, auditor
+and protocol. These are integrity checks, not a filesystem sandbox or a complete audit
+of every historical dependency. Failed scientific repair gates remain valid results;
+validation success does not require a successful learned repair.
+
+Evidence is written outside the checkout under runner temporary storage, displayed in
+the Actions job summary, and retained as an artifact for seven days even after normal
+test failures. It includes command logs, input/protected-file hashes, and the validator
+result when successful. Abrupt termination or unavailable storage can prevent evidence
+persistence. The job has read-only repository permissions, no stored checkout credentials,
+pinned actions and no training/dependency installs. It does not post comments or merge PRs.
+PR #2's separate safety workflow is unchanged.
+
 ## Validation limits
 
-Synthetic fixtures exercise the read-only CLI and corruption rejection, including a
-same-length duplicate-row replacement that passes the old per-row-plus-count logic.
-They are not trained-model evidence or a full rerun of the historical audit. Preparation
-inspected the producer, protocol and available report/CSV content, but large connector
-responses were truncated; no successful run over the full committed artifacts is claimed.
-Run the first command against a complete clone to obtain that separate validation.
-Native Windows remains untested for this supplement. PR #2's safety CI is independent;
-this PR does not modify its workflow or claim this new suite is already included there.
+The initial 13 structural tests and six new boundary methods have been exercised on
+synthetic fixtures during development, not full historical checkpoints. Large connector
+responses truncated the historical report/CSV, so full-artifact success and Windows
+compatibility must be established from actual successful hosted runs and their hashes.
+Adding the workflow alone does not establish them. Inspect that evidence before merging.
+Any mismatch must be investigated without rewriting frozen evidence to force a pass.
+No checkpoint, prediction, gradient or training replay is performed.

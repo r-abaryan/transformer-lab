@@ -41,6 +41,11 @@ def close(a, b, context):
     require(abs(number(a) - number(b)) <= TOLERANCE, 'Numeric mismatch: ' + context)
 
 
+def exposure_benefit(repair, gain):
+    """Original decision expression, without rounding or a tolerance."""
+    return repair and gain >= .10
+
+
 def unique_object(pairs):
     result = {}
     for key, value in pairs:
@@ -146,7 +151,7 @@ def validate(plan, report, csv_text):
     close(gains['all'], gains['repeated'], 'producer/auditor gain reconciliation')
     for group, gain in gains.items():
         close(report['length10_gain'], gain, 'reported gain versus ' + group)
-    benefit = own_gates['both']['repair'] and gains['repeated'] >= .10
+    benefit = exposure_benefit(own_gates['both']['repair'], gains['repeated'])
     require(type(report['exposure_specific_benefit']) is bool
             and report['exposure_specific_benefit'] == benefit, 'Stored benefit gate differs.')
     return dict(passed=True, scope='Report/CSV structure and scalar consistency only; no checkpoint audit.',

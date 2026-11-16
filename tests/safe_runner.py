@@ -4,6 +4,7 @@ import hashlib
 import importlib
 import json
 import re
+import stat
 import sys
 import traceback
 import unittest
@@ -16,13 +17,49 @@ ARCHIVED = ('test_copy_rope', 'test_copy_marker', 'test_copy_marker_alignment')
 FROZEN = ('copy_rope_training', 'copy_marker_training', 'copy_marker_alignment')
 
 
-def fresh_directory(base, name):
+def redirected(info):
+    return (stat.S_ISLNK(info.st_mode)
+            or bool(getattr(info, 'st_file_attributes', 0)
+                    & getattr(stat, 'FILE_ATTRIBUTE_REPARSE_POINT', 0x400)))
+
+
+def checked_directory(path, *, missing_ok=False):
+    try:
+        info = path.lstat()
+    except FileNotFoundError:
+        if missing_ok:
+            return False
+        raise
+    if redirected(info):
+        raise ValueError('Linked/reparse-point output components are not supported: ' + str(path))
+    if not stat.S_ISDIR(info.st_mode):
+        raise NotADirectoryError(str(path))
+    return True
+
+
+def fresh_directory(base, name, *, root=None):
     if not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_-]{0,79}', name):
         raise ValueError('Run name must be one alphanumeric, underscore or hyphen component.')
-    base = base.resolve()
-    base.mkdir(parents=True, exist_ok=True)
+    # Only the explicitly trusted checkout root is resolved, never the output path.
+    root = Path(ROOT if root is None else root).resolve(strict=True)
+    base = Path(base)
+    if not base.is_absolute() or '..' in base.parts:
+        raise ValueError('Output root must be an absolute path without parent traversal.')
+    try:
+        parts = base.relative_to(root).parts
+    except ValueError:
+        raise ValueError('Output root must stay inside the trusted checkout.') from None
+    checked_directory(root)
     target = base / name
+    parents = [root.joinpath(*parts[:i]) for i in range(1, len(parts) + 1)]
+    for path in [*parents, target]:
+        checked_directory(path, missing_ok=True)
+    for path in parents:
+        if not checked_directory(path, missing_ok=True):
+            path.mkdir()
+            checked_directory(path)
     target.mkdir(exist_ok=False)
+    checked_directory(target)
     return target
 
 
@@ -40,9 +77,9 @@ def snapshot(root, suite):
     def visit(path):
         key = path.relative_to(root).as_posix()
         try:
-            if any((root / Path(*path.relative_to(root).parts[:i])).is_symlink()
+            if any(redirected((root / Path(*path.relative_to(root).parts[:i])).lstat())
                    for i in range(1, len(path.relative_to(root).parts) + 1)):
-                raise ValueError('Symlinks are not supported in protected paths.')
+                raise ValueError('Links/reparse points are not supported in protected paths.')
             if path.is_dir():
                 entries[key] = 'directory'
                 for child in sorted(path.iterdir()):

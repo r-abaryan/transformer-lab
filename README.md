@@ -17,13 +17,28 @@ The focus is [explaining learned failures](docs/assessments/learning-mechanism-a
 | [Research workflow](docs/research-plan.md) | How questions become tests and studies |
 | [Rules](AGENTS.md) and [failure register](docs/assessments/failure-register.md) | Prevent repeat mistakes |
 
-Run the reusable copy correctness checks from the workspace root:
+## Quickstart
 
-```powershell
-.venv-gpu/Scripts/python.exe tests/run_tests.py
+Start with a Git clone and Python 3.12. From the repository root, run the lightweight
+checks below; no GPU, PyTorch, datasets or restored checkpoints are required:
+
+```text
+python tests/safe_runner.py --suite runner-safety
+python experiments/validate_copy_exposure_continuation.py
 ```
 
-The launcher uses fresh fixtures and checks that frozen files remain unchanged. See [test instructions](tests/README.md) for scope and artifact safety. It performs no training. Archived standalone scripts can write fixed historical paths, so inspect their protocol and output handling before rerunning anything.
+The first checks synthetic runner safeguards and creates a fresh ignored run summary.
+The second is read-only: it checks committed continuation JSON/CSV artifacts and their
+hashes, not model predictions or training. Use a Git checkout so the scoped artifact
+line-ending policy applies. Neither command establishes a learned mechanism or a new
+trained-model result.
+
+Follow the [fresh-clone guide and reproduction matrix](docs/guides/fresh-clone-quickstart.md)
+for expected outputs, artifact restoration and the separate prerequisites of archived
+copy checks. The [hardened-runner guide](docs/guides/safe-test-runner.md),
+[continuation validator guide](docs/guides/continuation-artifact-validation.md) and
+[test instructions](tests/README.md) define their scopes. Historical standalone scripts
+can write fixed evidence paths; do not run them indiscriminately.
 
 `experiments/` contains executed implementations and independent audits. `results/` contains raw measurements/checkpoints; `docs/` contains explanations and reports. Dependencies are recorded in [requirements-cpu.txt](requirements-cpu.txt), [requirements-gpu.txt](requirements-gpu.txt) and [requirements-data.txt](requirements-data.txt). GPU work uses native Windows on an RTX 4060 laptop with 8 GB VRAM.
 

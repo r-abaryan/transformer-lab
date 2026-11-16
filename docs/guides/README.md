@@ -1,5 +1,11 @@
 # Learning guides
 
+## Getting started and verification
+
+- [Fresh-clone quickstart and reproduction matrix](fresh-clone-quickstart.md)
+- [Hardened test entry point and artifact-safety limits](safe-test-runner.md)
+- [Continuation artifact validation, serialization and hosted checks](continuation-artifact-validation.md)
+
 Recent reports with integrated explanations and equations:
 
 - [How exposure can improve an existing weak solution](../topics/benchmarks/copy-exposure-continuation-results.md)

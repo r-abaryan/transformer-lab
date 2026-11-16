@@ -1,5 +1,7 @@
 # Hardened test entry point
 
+For automated Windows/Linux checks, artifacts and skip policy, see [synthetic safety CI](safety-ci.md).
+
 This additive launcher leaves `tests/run_tests.py` and historical test sources unchanged.
 It uses an explicit suite allowlist, not blanket discovery.
 

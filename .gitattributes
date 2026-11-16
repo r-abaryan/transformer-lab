@@ -1,0 +1,5 @@
+# Restore the original Windows serialization used by these frozen byte hashes.
+# Keep scope explicit; do not renormalize or rewrite historical artifacts.
+/results/copy_exposure_continuation/plan.json text eol=crlf
+/results/copy_exposure_continuation/report.json text eol=crlf
+/results/copy_exposure_continuation/metrics.csv text eol=crlf

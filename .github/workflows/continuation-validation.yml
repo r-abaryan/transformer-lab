@@ -1,0 +1,138 @@
+name: Continuation artifact validation
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  validate:
+    name: Continuation artifacts (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    env:
+      PYTHONUTF8: '1'
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Set up Python
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: '3.12'
+      - name: Check synthetic boundaries and complete frozen artifacts
+        shell: python {0}
+        run: |
+          import hashlib
+          import json
+          import os
+          import platform
+          import subprocess
+          import sys
+          import traceback
+          from pathlib import Path
+
+          root = Path.cwd()
+          out = Path(os.environ['RUNNER_TEMP']) / 'continuation-validation'
+          out.mkdir(exist_ok=False)
+          artifact_names = ('plan.json', 'report.json', 'metrics.csv')
+          source = root / 'results/copy_exposure_continuation'
+          protected = [source / name for name in artifact_names] + [
+              root / 'experiments/copy_exposure_continuation.py',
+              root / 'experiments/audit_copy_exposure_continuation.py',
+              root / 'docs/protocols/copy-exposure-continuation.md',
+              source / 'audit.json',
+          ]
+          def hashes():
+              return {p.relative_to(root).as_posix(): hashlib.sha256(p.read_bytes()).hexdigest() for p in protected}
+          report = dict(passed=False, commit=os.environ.get('GITHUB_SHA'), python=sys.version,
+                        platform=platform.platform(), commands=[], exception=None)
+          try:
+              report['before_sha256'] = hashes()
+              metadata = json.loads((source / 'report.json').read_bytes())
+              audit = json.loads((source / 'audit.json').read_bytes())
+              references = {'plan.json': metadata['plan_sha256'], 'metrics.csv': metadata['metrics_sha256'],
+                            'report.json': audit['report_sha256']}
+              report['artifact_serialization'] = {}
+              for name in artifact_names:
+                  path = source / name
+                  relative = path.relative_to(root).as_posix()
+                  payload = path.read_bytes()
+                  blob_id = subprocess.run(['git', 'rev-parse', 'HEAD:' + relative], cwd=root,
+                                           check=True, capture_output=True, text=True).stdout.strip()
+                  blob = subprocess.run(['git', 'cat-file', 'blob', blob_id], cwd=root,
+                                        check=True, capture_output=True).stdout
+                  attrs = subprocess.run(['git', 'check-attr', 'text', 'eol', '--', relative], cwd=root,
+                                         check=True, capture_output=True, text=True).stdout.strip()
+                  crlf = payload.count(b'\r\n')
+                  pure_crlf = crlf > 0 and payload.count(b'\n') == crlf and payload.count(b'\r') == crlf
+                  digest = hashlib.sha256(payload).hexdigest()
+                  report['artifact_serialization'][name] = dict(git_blob=blob_id,
+                      git_blob_sha256=hashlib.sha256(blob).hexdigest(), checkout_sha256=digest,
+                      recorded_sha256=references[name], historical_hash_matches=digest == references[name],
+                      crlf_lines=crlf, pure_crlf=pure_crlf, attributes=attrs)
+              commands = [
+                  ('structural-tests', [sys.executable, '-m', 'unittest', 'discover', '-s', 'tests', '-p', 'test_continuation_artifact_validation.py', '-v']),
+                  ('boundary-tests', [sys.executable, '-m', 'unittest', 'discover', '-s', 'tests', '-p', 'test_continuation_validation_boundaries.py', '-v']),
+                  ('checkout-policy-tests', [sys.executable, '-m', 'unittest', 'discover', '-s', 'tests', '-p', 'test_continuation_checkout_policy.py', '-v']),
+                  ('frozen-artifacts', [sys.executable, 'experiments/validate_copy_exposure_continuation.py']),
+              ]
+              actual = None
+              for name, command in commands:
+                  process = subprocess.run(command, cwd=root, capture_output=True, text=True,
+                                           encoding='utf-8', errors='replace', timeout=180)
+                  for suffix, content in (('stdout.txt', process.stdout), ('stderr.txt', process.stderr)):
+                      with (out / (name + '.' + suffix)).open('x', encoding='utf-8') as handle:
+                          handle.write(content)
+                  print(process.stdout, end='')
+                  print(process.stderr, end='', file=sys.stderr)
+                  report['commands'].append(dict(name=name, command=command, returncode=process.returncode))
+                  if name == 'frozen-artifacts':
+                      actual = json.loads(process.stdout) if process.returncode == 0 else None
+              expected = {name: report['before_sha256']['results/copy_exposure_continuation/' + name] for name in artifact_names}
+              if not (isinstance(actual, dict) and actual.get('passed') is True
+                      and actual.get('runs') == 8 and actual.get('csv_rows') == 328
+                      and actual.get('training_updates') == 0 and actual.get('input_sha256') == expected):
+                  raise ValueError('Complete frozen-artifact validation did not produce the required result and hashes.')
+              if not all(v['historical_hash_matches'] and v['pure_crlf'] for v in report['artifact_serialization'].values()):
+                  raise ValueError('Artifact checkout bytes do not match the original CRLF serialization and hashes.')
+              report['validation_result'] = actual
+              report['passed'] = all(item['returncode'] == 0 for item in report['commands'])
+          except Exception as error:
+              report['exception'] = dict(type=type(error).__name__, message=str(error), traceback=traceback.format_exc())
+          finally:
+              try:
+                  report['after_sha256'] = hashes()
+                  report['protected_files_unchanged'] = report.get('before_sha256') == report['after_sha256']
+              except Exception as error:
+                  report['protected_files_unchanged'] = False
+                  report['post_snapshot_error'] = str(error)
+              report['passed'] = report['passed'] and report['protected_files_unchanged']
+              rendered = json.dumps(report, indent=2, allow_nan=False)
+              with (out / 'validation-report.json').open('x', encoding='utf-8') as handle:
+                  handle.write(rendered + '\n')
+              with Path(os.environ['GITHUB_STEP_SUMMARY']).open('a', encoding='utf-8') as handle:
+                  handle.write('## Continuation artifact validation\n\n```json\n' + rendered + '\n```\n')
+          print(rendered)
+          sys.exit(0 if report['passed'] else 1)
+      - name: Retain validation evidence
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: continuation-validation-${{ matrix.os }}
+          path: ${{ runner.temp }}/continuation-validation
+          if-no-files-found: error
+          retention-days: 7

@@ -1,0 +1,114 @@
+name: Decoder FFN initialized preflight
+
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/decoder-ffn-preflight.yml'
+      - 'docs/protocols/copy-decoder-ffn-adaptation.md'
+      - 'experiments/copy_decoder_ffn_adaptation.py'
+      - 'tests/test_copy_decoder_ffn_adaptation.py'
+      - 'requirements-cpu.txt'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  preflight:
+    name: Initialized FFN preflight (Windows, Python 3.12)
+    runs-on: windows-latest
+    timeout-minutes: 20
+    env:
+      PYTHONUTF8: '1'
+      EXPECTED_HEAD: ${{ github.event.pull_request.head.sha }}
+    steps:
+      - name: Check out the exact PR head
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
+      - name: Set up Python
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: '3.12'
+      - name: Run only explicit initialized-fixture validation
+        shell: python
+        run: |
+          import hashlib, json, os, platform, re, subprocess, sys, time
+          from pathlib import Path
+
+          evidence = Path('results/test_runs')/('copy_ffn_ci_'+os.environ['GITHUB_RUN_ID']+'_'+os.environ['GITHUB_RUN_ATTEMPT'])
+          evidence.mkdir(parents=True, exist_ok=False)
+          def save(name, value):
+              (evidence/name).write_text(json.dumps(value, indent=2, allow_nan=False)+'\n', encoding='utf-8')
+          def execute(name, args):
+              start = time.perf_counter()
+              result = subprocess.run(args, capture_output=True, text=True, encoding='utf-8', errors='replace')
+              (evidence/(name+'.stdout.log')).write_text(result.stdout, encoding='utf-8')
+              (evidence/(name+'.stderr.log')).write_text(result.stderr, encoding='utf-8')
+              save(name+'.command.json', dict(command=args, returncode=result.returncode, seconds=time.perf_counter()-start))
+              print(result.stdout, end=''); print(result.stderr, end='', file=sys.stderr)
+              if result.returncode:
+                  raise RuntimeError(name+' failed; preserve logs and investigate without weakening checks')
+              return result
+
+          environment = dict(python=sys.version, executable=sys.executable, platform=platform.platform(),
+              machine=platform.machine(), cpu=platform.processor(), runner=os.environ.get('RUNNER_NAME'),
+              hosted_runner=True, user_laptop_validated=False, run_id=os.environ['GITHUB_RUN_ID'],
+              run_attempt=os.environ['GITHUB_RUN_ATTEMPT'], expected_head=os.environ['EXPECTED_HEAD'],
+              preflight_declared_settings=dict(device='cpu', dtype='float64', threads=1, deterministic_algorithms=True))
+          save('environment.json', environment)
+          try:
+              if platform.system() != 'Windows' or sys.version_info[:2] != (3, 12):
+                  raise RuntimeError('This job requires native Windows and Python 3.12')
+              head = execute('head', ['git', 'rev-parse', 'HEAD']).stdout.strip()
+              if head != os.environ['EXPECTED_HEAD']:
+                  raise RuntimeError('Checked-out commit does not match PR head')
+              paths = ['requirements-cpu.txt', 'docs/protocols/copy-decoder-ffn-adaptation.md',
+                  'experiments/copy_decoder_ffn_adaptation.py', 'tests/test_copy_decoder_ffn_adaptation.py',
+                  '.github/workflows/decoder-ffn-preflight.yml']
+              save('source-hashes.json', {p: hashlib.sha256(Path(p).read_bytes()).hexdigest() for p in paths})
+              environment['cpu_names'] = execute('cpu', ['powershell', '-NoProfile', '-Command',
+                  '(Get-CimInstance Win32_Processor | Select-Object -ExpandProperty Name) -join "; "']).stdout.strip()
+              save('environment.json', environment)
+              execute('install', [sys.executable, '-m', 'pip', 'install', '-r', 'requirements-cpu.txt'])
+              import torch
+              environment.update(torch=torch.__version__, cuda_available=torch.cuda.is_available(),
+                  launcher_torch_threads=torch.get_num_threads())
+              save('environment.json', environment)
+              execute('packages', [sys.executable, '-m', 'pip', 'freeze'])
+              tests = execute('tests', [sys.executable, '-m', 'unittest', 'discover', '-s', 'tests',
+                  '-p', 'test_copy_decoder_ffn_adaptation.py', '-v'])
+              output = tests.stdout+'\n'+tests.stderr
+              match = re.search(r'^Ran (\d+) tests? in ', output, re.MULTILINE)
+              if not match or int(match.group(1)) < 6 or not re.search(r'^OK\s*$', output, re.MULTILINE):
+                  raise RuntimeError('All baseline and added tests must execute without skips or expected failures')
+              save('tests.result.json', dict(tests=int(match.group(1)), passed=int(match.group(1)), failures=0, errors=0, skipped=0))
+              run = execute('preflight', [sys.executable, 'experiments/copy_decoder_ffn_adaptation.py', 'preflight'])
+              report = json.loads(run.stdout)
+              save('preflight.json', report)
+              if not (report.get('passed') is True and report.get('formal_ready') is False
+                  and report.get('formal_updates') == 0 and report.get('fixture_updates') == 17
+                  and len(report.get('profiles', [])) == 16 and report.get('audit_cells') == 10):
+                  raise RuntimeError('Preflight contract mismatch; no formal execution is permitted')
+              execute('tracked-diff', ['git', 'diff', '--exit-code', 'HEAD', '--'])
+              status = execute('worktree', ['git', 'status', '--porcelain', '--untracked-files=all'])
+              if status.stdout.strip():
+                  raise RuntimeError('Validation left unexpected repository changes')
+              save('validation-status.json', dict(initialized_checks_passed=True, formal_ready=False,
+                  formal_updates=0, fixture_updates_per_preflight=17,
+                  limitation='The test suite and CLI each invoke preflight; unit tests add discarded fixture steps. Hosted Windows is not the user laptop. A baseline pass does not establish the requested gradient, sampler or memory improvements.'))
+          finally:
+              save('evidence-hashes.json', {str(p.relative_to(evidence)): hashlib.sha256(p.read_bytes()).hexdigest()
+                  for p in sorted(evidence.iterdir()) if p.is_file() and p.name != 'evidence-hashes.json'})
+      - name: Preserve complete validation evidence even on failure
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: decoder-ffn-preflight-${{ github.run_id }}-${{ github.run_attempt }}
+          path: results/test_runs/copy_ffn_ci_*
+          if-no-files-found: error
+          retention-days: 30

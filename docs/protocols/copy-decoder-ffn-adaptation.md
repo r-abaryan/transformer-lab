@@ -1,122 +1,122 @@
-# Decoder FFN adaptation and positional exposure
+# Decoder FFN adaptation: proposed protocol and preflight
 
-Status: proposed protocol and initialized-fixture preflight, 2026-11-17.
-No formal runner, frozen execution plan, study results or training authorization.
-Base reviewed: `dc84d618c2ddc6c1ee6b6406fe43c97a14107627`.
+2026-11-17. No formal runner, execution authorization or new research result.
+Baseline hosted Windows/Python 3.12 passed at `667562c`; this follow-up needs its
+own CI, exact-diff and raw-evidence review. Keep PR #5 in draft until then.
 
-## Question and evidence boundary
+## Scientific design (unchanged)
 
-Does allowing the decoder FFN parameters to update modify the full-copy benefit
-of adding self-site positional exposure from the same weak checkpoint?
-The [continuation](../topics/benchmarks/copy-exposure-continuation-results.md)
-records 55/128 versus 99/128 complete length-10 copies; the 95% repair gate failed.
-The [trace and classifier control](../topics/benchmarks/copy-exposure-stage-trace-results.md)
-show downstream growth in a readout projection, not FFN adaptation causality.
-Read the [failure register](../assessments/failure-register.md): incompatible
-component swaps are not a clean substitute for this training comparison.
+Does allowing decoder FFN updates change the incremental complete-copy benefit
+of added self-site positional exposure from the same selected weak checkpoint?
 
-## Proposed factorial comparison
-
-| Cell | Self-site exposure | Decoder FFN updates |
+| Cell | Added self-site exposure | Decoder FFN updates |
 |---|---|---|
-| A | No, retain cross-only | Allowed |
-| B | Yes, retain cross exposure too | Allowed |
-| C | No, retain cross-only | Frozen |
-| D | Yes, retain cross exposure too | Frozen |
+| A | No | Allowed |
+| B | Yes | Allowed |
+| C | No | Frozen |
+| D | Yes | Frozen |
 
-Use seed 3767 cross-only update 6000 from `results/copy_learning_trajectory`.
-Restore identical model tensors, complete Adam state, example-generator state and
-position-generator state. No new initialization, optimizer reset or seed search.
-Freeze exactly `base.decoder.linear{1,2}.{weight,bias}` in C/D. All attention,
-encoder FFN, normalization and classifier parameters stay trainable. Keep the
-same ordered optimizer parameter collection when loading its state. Frozen
-parameters must have `grad is None`; parameters, moments and step counters must
-remain bitwise unchanged. Gradients through FFN inputs must remain available.
+Use the seed-3767 cross-only update-6000 model, complete Adam state and both RNGs
+from `results/copy_learning_trajectory`. All cells retain cross-site exposure;
+B/D also apply the same positions jointly at both self-attention sites.
+Freeze only `base.decoder.linear{1,2}.{weight,bias}`; keep every other parameter
+trainable, original single Adam group/order and moment mapping intact. Frozen
+gradients must be None; tensors, moments and counters must be bitwise unchanged.
 
-Preserve the historical content/EOS objective and coefficients. In B/D the same
-sampled ordered positions apply jointly to encoder and decoder self-attention;
-all cells use the same cross-attention positions. This does not localize the two
-self-attention sites or separate upstream, normalization and readout adaptation.
+Inherit labels, pools, objective, evaluation/stopping and complete metrics from
+[the continuation protocol](copy-exposure-continuation.md): 14 non-uniform pools;
+all short train/validation/test groups, long 8/10 groups, absent groups null;
+full generation, content, teacher-forced CE/accuracy and all EOS timing outcomes.
+Use native contiguous-position evaluation, not oracle prefixes or forced EOS.
+Window 6001-8000; Adam lr .001; CPU float64, one thread, no dropout/accumulation.
+Cycle lengths 3/4/5/6 with batches 210/168/140/120, 840 content/EOS targets/update.
+Per cell: 2000 updates, 319000 examples, 1680000 targets. Quartet maximum: 8000
+updates, 1276000 examples, 6720000 targets. Observe 6000/6500/7000/7500/8000;
+only 8000 decides outcomes. No tuning, favorable checkpoint, seed or budget sweep.
 
-## Fixed candidate budget and measurements
+Primary: (B-A)-(D-C) on all 128 length-10 complete copies. Report both effects,
+counts and paired rescues/harms. Material attenuation: >=13/128, positive B-A,
+and >=99% short-group complete copying in every cell at every measured checkpoint.
+This is a proposed practical threshold, not a power/significance claim. Report
+length-8/group effects secondarily and the historical 95% repair gate separately.
+Short preservation is an interpretability condition, not implementation validity:
+correct freezing that harms familiar copying is a reportable, mechanistically
+inconclusive outcome, not permission to discard or repair it. Report small,
+negative and mixed results. State/stream/gradient defects are implementation
+failures. Attenuation is not unique mediation; positive D-C is not equivalence.
+Opened pools, one selected start and four arms are not independent replications.
+See [results](../topics/benchmarks/copy-exposure-continuation-results.md),
+[trace limits](../topics/benchmarks/copy-exposure-stage-trace-results.md) and
+[failure register](../assessments/failure-register.md); do not repeat failed swaps.
 
-Proposed window: updates 6001-8000, Adam lr .001, CPU float64, one thread,
-no dropout or accumulation. Cycle lengths 3/4/5/6 with batches 210/168/140/120:
-840 supervised targets per update, 319000 examples and 1680000 targets per cell;
-8000 updates, 1276000 examples and 6720000 targets across the quartet.
-Record every checkpoint at 6000/6500/7000/7500/8000. Only 8000 decides outcomes;
-no best-checkpoint selection, early outcome selection, extension or replacement.
-
-Reuse exactly the 14 non-uniform pools in `copy_position_sites/data.json`.
-Freeze the data/start/dependency hashes before any formal evaluation. Record
-train/validation/test lengths 3-6 and tests 8/10, all/distinct/repeated groups,
-with absent groups explicitly null. Evaluation uses contiguous positions and
-self-generated sequences, the original EOS stop rule and length+3 cap. Record
-complete copies, content exactness, teacher-forced CE and token/content accuracy,
-and early/on-time/late/missing EOS. Correct-prefix scores are not generation.
-
-Primary contrast is complete length-10 copy accuracy, (B-A)-(D-C).
-Report raw counts, paired rescues/harms and both exposure effects as well.
-Proposed material attenuation threshold: at least 13/128 (10.15625 percentage
-points) in this interaction, with B-A positive and every short group in all
-four cells >=99% complete copies at every measured checkpoint. This is a declared
-practical threshold, not a power calculation or statistical-significance claim.
-Report length-8 distinct/repeated and aggregate effects as secondary checks;
-do not replace a failing primary result with a favorable secondary metric.
-
-An attenuated effect with preservation supports a conditional contribution of
-allowing FFN adaptation, not unique mediation or FFN-only sufficiency. A positive
-D-C demonstrates benefit is possible with the starting decoder FFN fixed; it
-does not prove equivalence or absence of FFN involvement in the original route.
-Short-task damage makes specific mediation interpretation inconclusive. Report
-negative interactions and mixed outcomes. Keep the historical >=95% long-group
-repair gate separate and unchanged. Counts are not independent training seeds.
-Opened data and one selected start make this a diagnostic, not fresh confirmation.
-
-## Preflight and execution gates
-
-Run only these explicit new entry points; no blanket historical discovery:
+## Preflight acceptance
 
 ```sh
 python -m unittest discover -s tests -p test_copy_decoder_ffn_adaptation.py -v
 python experiments/copy_decoder_ffn_adaptation.py preflight
 ```
 
-The module has only `preflight`, never `run`. It creates initialized fixtures in
-a temporary directory, reloads them with weights_only, exercises the native
-evaluator and reference audit, correct/wrong supplied generations, missing-group
-and corruption controls, native/reference trainable gradients, frozen Adam history,
-input gradients and matched fixture streams. It makes 17 discarded fixture
-updates, not 8000 formal updates. Historical checkpoints/data are not opened.
-Profiles cover the four cells and four full batch sizes, including Adam state;
-CPU peak memory is explicitly unmeasured, not inferred from tensor-byte counts.
-The reference shares historical model helpers; it is not an independent model.
+All 11 tests and additions must execute without unexpected skips. Each preflight
+makes 17 discarded fixture updates, 16 profiles, 10 audited cells; the suite and
+CLI each invoke it and unit fixtures add steps. Report accounting separately.
+Require passed=true and formal_ready=false. The CLI has only preflight, never run.
 
-Before any formal run, a separate reviewed implementation/approval must:
-- Pass this preflight and its tests on native Windows, profile peak process memory
-  including optimizer/evaluation/import overhead, and record environment versions.
-- Verify availability and historical hashes of the trained start, pools, old
-  plan/report/audit and dependencies. Do not regenerate missing evidence.
-- Independently verify historical sampling and generator restoration, all labels,
-  counters, stream hashes, reload/import paths and intentional failure controls.
-- Reproduce A/B's declared historical predictions and endpoint model/optimizer/
-  generator tensors exactly under the declared environment; stop on mismatch.
-- Freeze the final hashes, budget, thresholds and preservation gates prospectively.
-- Audit all saved cells, gradients/state-freeze invariants and complete metrics;
-  guard historical evidence and write only to a new, exclusive study directory.
+Compare identical full-forward frozen/unrestricted values and shared gradients
+at absolute 1e-10, rtol 0. Retain the actual FFN output gradient. Deliberate FFN
+output detachment must preserve values but change upstream gradients and fail
+the same comparison; residual-bypass gradients alone do not suffice. Keep all
+native/reference gradient, saved initialized evaluator/audit, supplied generation,
+missing-group and corruption checks. Reject live/saved optimizer permutations,
+each frozen tensor/moment/counter mutation, and zero-gradient Adam updates.
+Byte comparisons distinguish signed zero. The optimizer-ID check assumes the
+historical sequential-ID, single-group format, not generic checkpoint support.
+Preserve saved fixture bytes, original in-memory state and restored generators.
 
-Any nonfinite value, failed invariant or historical-replay mismatch stops as an
-implementation/precondition failure, without tuning or replacement. A short-fit
-failure is reported, not repaired by another budget. No automatic seed, block,
-site or range sweep. Fresh confirmation would require a separate decision.
+## Sampler fixture is not historical replay
 
-## Primary sources and interpretation
+Use historical sample/positions helpers on synthetic ordered pools. Independently
+check indices, packed ranks, positions, RNG states, hashes and midstream restore;
+reject an extra RNG draw even if returned indices match. No historical data or
+checkpoint is loaded. A later runner must separately preserve and verify:
+- Hashed update-6000 model, complete Adam state, both saved RNGs and lineage.
+- Exact training pool identities/order: distinct first half, repeated second.
+- n=3+(step-1)%4, batch=840//(n+1), fixed 2x105 float64 torch.rand consumption
+  every step (including unused columns), floor(rank*half), second-half offset,
+  then first-half/second-half flattening of indices.
+- Separate randperm(11), first n+1 entries sorted; BOS prefixes, full content/EOS
+  labels, CE weights, counters, checkpoint steps, resume and generator states.
+- Continuation hashes: default json.dumps([n, idx.tolist()]).encode() and
+  json.dumps(pos.tolist()).encode(); whitespace/serialization is significant.
 
-[Ruoss et al. (2023), section 3](https://arxiv.org/html/2305.16843v1#S3)
-was inspected for ordered positional sampling. Exposure is published; this
-checkpoint, RoPE-site choice, factorial contrast and thresholds are local choices.
-[Heimersheim and Nanda (2024)](https://arxiv.org/html/2404.15255v1)
-was inspected for intervention/metric interpretation limits. This is constrained
-training, not activation patching. Neither source predicts the local counts,
-establishes this hypothesis or supplies a novelty claim. No field-level novelty
-or reliable complete repair is established by this proposed diagnostic.
+Synthetic success does not certify saved pools/checkpoints or A/B trajectories.
+Exact A/B replay remains mandatory before C/D. After separate authorization,
+A/B are the first 4000 of the 8000 quartet updates, not extra unbudgeted runs.
+Stop missing artifacts/mismatches; never regenerate historical evidence.
+
+## Memory, evidence and later execution
+
+Windows stdlib ctypes GetProcessMemoryInfo/PROCESS_MEMORY_COUNTERS_EX records
+before/after peak/current working set and peak/current private commit in bytes.
+These are distinct process counters, not tensor totals. Windows measurement
+failure fails validation; unsupported platforms report unavailable. Peaks cover
+process lifetime (imports, optimizer, evaluation), not isolated-step increments
+or formal-run upper bounds. Prefer the fresh CLI measurement. Record batch 210,
+step/total timings, CPU/platform/Python/PyTorch and numerical settings.
+
+Approved Windows CI saves logs, JSON, environment, commands/timings and source/
+evidence hashes under ignored results/test_runs and reviewer-accessible artifacts
+(30-day retention; archive before expiry). Hosted Windows is not the user's
+laptop. Review raw evidence; shared model helpers are not an independent model.
+Before formal execution: review this diff/CI evidence, intended-hardware feasibility,
+historical hashes/sampler/labels/counters/RNG restoration and exact A/B replay;
+review a saved-result audit and new exclusive contained output directory; freeze
+final hashes/metrics/gates/budget; obtain separate approval. No automatic merge,
+formal training, architecture expansion or weakened checks belongs in this PR.
+
+## Sources inspected
+
+[Ruoss et al., section 3](https://arxiv.org/html/2305.16843v1#S3): ordered positional
+exposure. [Heimersheim and Nanda](https://arxiv.org/html/2404.15255v1): intervention/
+metric interpretation. [Microsoft](https://learn.microsoft.com/en-us/windows/win32/api/psapi/ns-psapi-process_memory_counters_ex):
+working-set/commit semantics. Checkpoint/site/contrast/threshold choices and
+scores are local, not source predictions. No novelty or reliable repair claim.

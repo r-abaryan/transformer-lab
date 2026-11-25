@@ -8,6 +8,15 @@ on:
       - 'experiments/copy_decoder_ffn_adaptation.py'
       - 'tests/test_copy_decoder_ffn_adaptation.py'
       - 'requirements-cpu.txt'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/decoder-ffn-preflight.yml'
+      - 'docs/protocols/copy-decoder-ffn-adaptation.md'
+      - 'experiments/copy_decoder_ffn_adaptation.py'
+      - 'tests/test_copy_decoder_ffn_adaptation.py'
+      - 'requirements-cpu.txt'
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -23,12 +32,12 @@ jobs:
     timeout-minutes: 20
     env:
       PYTHONUTF8: '1'
-      EXPECTED_HEAD: ${{ github.event.pull_request.head.sha }}
+      EXPECTED_HEAD: ${{ github.event.pull_request.head.sha || github.sha }}
     steps:
       - name: Check out the exact PR head
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ github.event.pull_request.head.sha }}
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
           persist-credentials: false
       - name: Set up Python
         uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
@@ -84,7 +93,7 @@ jobs:
                   '-p', 'test_copy_decoder_ffn_adaptation.py', '-v'])
               output = tests.stdout+'\n'+tests.stderr
               match = re.search(r'^Ran (\d+) tests? in ', output, re.MULTILINE)
-              if not match or int(match.group(1)) < 6 or not re.search(r'^OK\s*$', output, re.MULTILINE):
+              if not match or int(match.group(1)) < 11 or not re.search(r'^OK\s*$', output, re.MULTILINE):
                   raise RuntimeError('All baseline and added tests must execute without skips or expected failures')
               save('tests.result.json', dict(tests=int(match.group(1)), passed=int(match.group(1)), failures=0, errors=0, skipped=0))
               run = execute('preflight', [sys.executable, 'experiments/copy_decoder_ffn_adaptation.py', 'preflight'])

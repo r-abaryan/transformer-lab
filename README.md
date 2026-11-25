@@ -40,6 +40,6 @@ copy checks. The [hardened-runner guide](docs/guides/safe-test-runner.md),
 [test instructions](tests/README.md) define their scopes. Historical standalone scripts
 can write fixed evidence paths; do not run them indiscriminately.
 
-`experiments/` contains executed implementations and independent audits. `results/` contains raw measurements/checkpoints; `docs/` contains explanations and reports. Dependencies are recorded in [requirements-cpu.txt](requirements-cpu.txt), [requirements-gpu.txt](requirements-gpu.txt) and [requirements-data.txt](requirements-data.txt). GPU work uses native Windows on an RTX 4060 laptop with 8 GB VRAM.
+`experiments/` contains executed implementations and independent audits. `results/` contains raw measurements/checkpoints; `docs/` contains explanations and reports. Dependencies are recorded in [requirements-cpu.txt](requirements-cpu.txt), [requirements-gpu.txt](requirements-gpu.txt), [requirements-data.txt](requirements-data.txt) and [requirements-analysis.txt](requirements-analysis.txt). GPU work uses native Windows on an RTX 4060 laptop with 8 GB VRAM.
 
 The project began on 2026-09-29. Frozen evidence remains at its original paths; document cleanup does not change the measurements.

@@ -1,8 +1,8 @@
 # Decoder FFN adaptation: proposed protocol and preflight
 
 2026-11-17. No formal runner, execution authorization or new research result.
-Baseline hosted Windows/Python 3.12 passed at `667562c`; this follow-up needs its
-own CI, exact-diff and raw-evidence review. Keep PR #5 in draft until then.
+Baseline hosted Windows/Python 3.12 passed at `667562c`; PR #5 merged at `61a6f73`.
+Review CI evidence, exact diffs and raw outputs before authorizing any formal run.
 
 ## Scientific design (unchanged)
 

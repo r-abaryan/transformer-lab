@@ -152,14 +152,15 @@ def execute(directory, suite, root=ROOT):
         summary['passed'] = bool(result is not None and result.testsRun > 0
                                  and result.wasSuccessful() and summary['exception'] is None
                                  and summary['frozen_files_unchanged'])
+        summary_written = False
         try:
             with (directory / 'summary.json').open('x', encoding='utf-8') as handle:
                 json.dump(summary, handle, indent=2)
                 handle.write('\n')
+            summary_written = True
         except OSError as error:
             print('Cannot write failure/success summary: ' + str(error), file=sys.stderr)
-            return 1
-    return 0 if summary['passed'] else 1
+    return 0 if summary_written and summary['passed'] else 1
 
 
 def main(argv=None):

@@ -1,5 +1,9 @@
 # Frozen experiment protocols
 
+Proposed (unexecuted, preflight only):
+
+- [Decoder FFN adaptation (proposed, preflight only)](copy-decoder-ffn-adaptation.md)
+
 Recent copy studies, all executed; these links are not a run queue:
 
 - [Classifier control extending the existing exposure trace](copy-exposure-readout-control.md)

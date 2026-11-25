@@ -1,6 +1,6 @@
 # Explaining learned failures
 
-Latest result: [the four-condition copy comparison](../topics/benchmarks/copy-position-sites-results.md) confirms combined exposure in every fresh seed. Cross-only succeeds in two seeds but fails at length 10 in the third; self-only remains weak. All short-task fit gates pass. The [copy assessment](copy-generalization-assessment.md) now consolidates the bounded learning account. No experiment is running or queued; exact mediation and broader transfer remain open.
+For current status, read the [research checkpoint](research-checkpoint.md) and [copy assessment](copy-generalization-assessment.md). Earlier milestone context: [the four-condition copy comparison](../topics/benchmarks/copy-position-sites-results.md) confirmed combined exposure in every fresh seed (cross-only succeeded in two seeds and failed at length 10 in the third; self-only stayed weak, with all short-task fit gates passing).
 
 Active direction, 2026-10-07. Prioritize understanding learned mechanisms and identifying a genuine research gap before selecting another experiment. The user parked RL. Completed experiments remain evidence; their stopping rules do not settle their underlying questions. This page records priorities and the initial review; the separate [endpoint-gradient diagnostic](../topics/attention/objective-beta-pressure-results.md) is executed and audited.
 

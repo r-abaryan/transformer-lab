@@ -128,9 +128,9 @@
   "study_hashes": {
     "docs/protocols/copy-decoder-ffn-adaptation.md": "59261a5176937c9074866a9aaeb1bbd3b7b230e4c3b3786e55656eec14485874",
     "experiments/copy_decoder_ffn_adaptation.py": "76218ce11448881ee03b380c9a98c7419318f9c02320d3694908f7cb813e4e45",
-    "experiments/prepare_copy_decoder_ffn_adaptation.py": "8a6bcbaa9e6af0f83175d4d475a8b302088780aaa7f3ee21d3690351fa3075d1",
+    "experiments/prepare_copy_decoder_ffn_adaptation.py": "d5eac2f744978494ae9354bdabf9486b413fdca74d6038d6112112ecb2f1b8e3",
     "tests/test_copy_decoder_ffn_adaptation.py": "ca897e09cab17842ea0c7c333b168829c85efb5c9a72b532b55dec1b44a8e6ee",
-    "tests/test_copy_decoder_ffn_lock.py": "c2e1bdb9262954f888cec152959bc90fdc4fab09c0f1822aa82c4e7a76dc59de"
+    "tests/test_copy_decoder_ffn_lock.py": "7f2ef986f39a443a4c4968d430f3fd679c3256628639cc4c6afc828aee32f7e9"
   },
   "historical_artifact_hashes": {
     "results/copy_learning_trajectory/3767_cross_only_6000.pt": "b0a9005852828b4a888467b2677827b6a9ef50d65b9d7cfa238034e7e0b1086c",
@@ -279,7 +279,7 @@
   },
   "limitation": "Preflight and read-only historical A/B replay locked; requires separate formal runner and explicit execution authorization before running C/D.",
   "verification_artifacts": {
-    "results/copy_decoder_ffn_adaptation/ab_replay_verification.json": "20f3041ea811c80e11629c52715bf08a39c3ad42c1a3cc34fc7d66e1a0594cfb",
-    "results/copy_decoder_ffn_adaptation/preflight.json": "fc396967e708a7d4197d6c16bfb6d6c6f8eed12464f47ccab5a9fed3133446cc"
+    "results/copy_decoder_ffn_adaptation/ab_replay_verification.json": "c3323f9fb92bc0b4d6946514be059bcca21211c4da0e1873050298c69ebf27f2",
+    "results/copy_decoder_ffn_adaptation/preflight.json": "6bad3ddb1f563c18764ac94a0895e061be1bb6b691ccc5ba71cd506af2d621c0"
   }
 }

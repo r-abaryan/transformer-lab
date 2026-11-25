@@ -112,7 +112,7 @@ jobs:
                   '-p', 'test_copy_decoder_ffn_lock.py', '-v'])
               lock_output = lock_tests.stdout+'\n'+lock_tests.stderr
               lock_match = re.search(r'^Ran (\d+) tests? in ', lock_output, re.MULTILINE)
-              if not lock_match or int(lock_match.group(1)) < 11 or not re.search(r'^OK\s*$', lock_output, re.MULTILINE):
+              if not lock_match or int(lock_match.group(1)) < 12 or not re.search(r'^OK\s*$', lock_output, re.MULTILINE):
                   raise RuntimeError('All synthetic lock/replay tests must execute without skips or expected failures')
               save('lock_tests.result.json', dict(tests=int(lock_match.group(1)), passed=int(lock_match.group(1)), failures=0, errors=0, skipped=0))
               bundle = execute('verify-lock', [sys.executable, 'experiments/prepare_copy_decoder_ffn_adaptation.py', 'verify-lock'])

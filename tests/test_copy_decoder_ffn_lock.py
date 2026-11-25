@@ -371,7 +371,8 @@ class HistoricalVerificationAndLockTests(unittest.TestCase):
             eval_cells_checked=14,
             artifact_hashes={"results/protected.json": protected_sha},
             protected_hashes={"results/protected.json": protected_sha},
-            environment=dict(python="3.14", torch="test", dtype="float64", device="cpu"),
+            environment=dict(python="3.14", torch="test", threads=1, deterministic_algorithms=True,
+                             dtype="float64", device="cpu"),
         )
         fake_preflight = dict(passed=True, formal_updates=0, fixture_updates=17)
 
@@ -428,7 +429,8 @@ class HistoricalVerificationAndLockTests(unittest.TestCase):
             eval_cells_checked=126,
             artifact_hashes={"results/protected.json": protected_sha},
             protected_hashes={"results/protected.json": protected_sha},
-            environment=dict(python="3.14", torch="test", dtype="float64", device="cpu"),
+            environment=dict(python="3.14", torch="test", threads=1, deterministic_algorithms=True,
+                             dtype="float64", device="cpu"),
         )
         fake_preflight = dict(passed=True, formal_updates=0, fixture_updates=17)
 
@@ -461,7 +463,7 @@ class HistoricalVerificationAndLockTests(unittest.TestCase):
         self.assertTrue(retry["passed"])
         self.assertTrue((lock_dir / "lock.json").is_file())
 
-    def test_verify_lock_bundle_accepts_valid_and_rejects_tampering(self):
+    def _create_valid_synthetic_lock_bundle(self):
         self._write_study_files()
         protected = self.root / "results/protected.json"
         protected.parent.mkdir(parents=True, exist_ok=True)
@@ -485,6 +487,8 @@ class HistoricalVerificationAndLockTests(unittest.TestCase):
             for step in prep.STAGES
             for arm in prep.ARMS
         ]
+        env = dict(python="3.14", torch="test", threads=1, deterministic_algorithms=True,
+                   dtype="float64", device="cpu")
         fake_replay = dict(
             passed=True,
             formal_ready=False,
@@ -499,7 +503,7 @@ class HistoricalVerificationAndLockTests(unittest.TestCase):
             lineage_protected_files=1,
             artifact_hashes={"results/protected.json": protected_sha},
             protected_hashes={"results/protected.json": protected_sha},
-            environment=dict(python="3.14", torch="test", dtype="float64", device="cpu"),
+            environment=env,
         )
         fake_preflight = dict(
             passed=True,
@@ -509,6 +513,7 @@ class HistoricalVerificationAndLockTests(unittest.TestCase):
             profiles=[{}] * 16,
             audit_cells=10,
             checks=dict(saved_initialized_evaluator_and_audit=True),
+            environment=dict(env),
         )
         create_lock(
             results_root=self.root / "results",
@@ -517,13 +522,16 @@ class HistoricalVerificationAndLockTests(unittest.TestCase):
             replay_fn=lambda _: fake_replay,
             preflight_fn=lambda: fake_preflight,
         )
+        return self.root / "results/copy_decoder_ffn_adaptation", fake_replay, fake_preflight
+
+    def test_verify_lock_bundle_accepts_valid_and_rejects_tampering(self):
+        lock_dir, fake_replay, fake_preflight = self._create_valid_synthetic_lock_bundle()
 
         summary = verify_lock_bundle(results_root=self.root / "results", lock_name="copy_decoder_ffn_adaptation", root=self.root)
         self.assertTrue(summary["passed"])
         self.assertEqual(summary["stage_records"], 8)
         self.assertEqual(summary["ab_replay_eval_cells"], 126)
 
-        lock_dir = self.root / "results/copy_decoder_ffn_adaptation"
         study_file = self.root / STUDY_FILES[0]
         original_study = study_file.read_bytes()
         study_file.write_bytes(b"modified protocol")
@@ -562,6 +570,35 @@ class HistoricalVerificationAndLockTests(unittest.TestCase):
         lock_path.write_text(json.dumps(bad_lock_2), encoding="utf-8")
         with self.assertRaisesRegex(AssertionError, "evaluated cell count mismatch"):
             verify_lock_bundle(results_root=self.root / "results", lock_name="copy_decoder_ffn_adaptation", root=self.root)
+
+    def test_verify_lock_bundle_rejects_lock_only_drift(self):
+        lock_dir, _, _ = self._create_valid_synthetic_lock_bundle()
+        lock_path = lock_dir / "lock.json"
+        ab_bytes_before = (lock_dir / "ab_replay_verification.json").read_bytes()
+        pre_bytes_before = (lock_dir / "preflight.json").read_bytes()
+        original_lock = lock_path.read_bytes()
+
+        mutations = [
+            ("decision_step_7500", lambda d: d["budget"].__setitem__("decision_step", 7500), "canonical protocol budget"),
+            ("threshold_zero", lambda d: d["gates"].__setitem__("material_attenuation_min_gain", 0), "canonical protocol gates"),
+            ("threshold_zero_float", lambda d: d["gates"].__setitem__("material_attenuation_min_gain", 0.0), "canonical protocol gates"),
+            ("threads_bool_confusion", lambda d: d["budget"].__setitem__("threads", True), "canonical protocol budget"),
+            ("cell_D_unfrozen", lambda d: d["budget"]["cells"]["D"].__setitem__("decoder_ffn_frozen", False), "canonical protocol budget"),
+            ("start_checkpoint", lambda d: d.__setitem__("start_checkpoint", "results/other.pt"), "Lock start_checkpoint mismatch"),
+            ("env_dtype", lambda d: d["environment"].__setitem__("dtype", "float32"), "environment metadata differs"),
+        ]
+        for label, mutator, err_pattern in mutations:
+            with self.subTest(label=label):
+                mutated = json.loads(original_lock)
+                mutator(mutated)
+                lock_path.write_text(json.dumps(mutated), encoding="utf-8")
+                with self.assertRaisesRegex(AssertionError, err_pattern):
+                    verify_lock_bundle(results_root=self.root / "results", lock_name="copy_decoder_ffn_adaptation", root=self.root)
+                lock_path.write_bytes(original_lock)
+
+        self.assertEqual((lock_dir / "ab_replay_verification.json").read_bytes(), ab_bytes_before)
+        self.assertEqual((lock_dir / "preflight.json").read_bytes(), pre_bytes_before)
+        self.assertTrue(verify_lock_bundle(results_root=self.root / "results", lock_name="copy_decoder_ffn_adaptation", root=self.root)["passed"])
 
     def test_optimized_mode_rejected(self):
         script = str(ROOT / "experiments/prepare_copy_decoder_ffn_adaptation.py")

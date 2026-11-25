@@ -466,30 +466,15 @@ def replay_ab(root=ROOT, verify_eval=True):
     )
 
 
-def build_lock_payload(replay_report, preflight_report, root=ROOT, lock_dir_rel=f"results/{DEFAULT_LOCK_NAME}"):
-    """Build the frozen lock specification prior to separate formal execution authorization."""
-    study_hashes = {}
-    for rel in STUDY_FILES:
-        target = root / rel
-        require(target.is_file(), f"Missing study file: {rel}")
-        study_hashes[rel] = digest(target)
-
+def canonical_lock_contract():
+    """Return the canonical budget, gates, and pointers shared by build_lock_payload and verify_lock_bundle."""
+    per_arm_updates = len(STAGES) * STAGE_UPDATES
+    per_arm_examples = len(STAGES) * STAGE_EXAMPLES
+    per_arm_targets = len(STAGES) * STAGE_TARGETS
     return dict(
-        schema_version=1,
-        status="locked_awaiting_authorization",
-        formal_ready=False,
-        formal_authorized=False,
-        formal_updates=0,
-        output_directory=lock_dir_rel,
         start_checkpoint=START_REL,
         data_file=DATA_REL,
         ab_replay_source=CONTINUATION_REL,
-        ab_replay_passed=replay_report["passed"],
-        ab_replay_bitwise_exact=replay_report["bitwise_exact_all"],
-        ab_replay_eval_cells=replay_report["eval_cells_checked"],
-        preflight_passed=preflight_report["passed"],
-        preflight_fixture_updates=preflight_report["fixture_updates"],
-        environment=replay_report["environment"],
         budget=dict(
             cells=dict(
                 A=dict(self_site_exposure=False, decoder_ffn_frozen=False),
@@ -498,10 +483,10 @@ def build_lock_payload(replay_report, preflight_report, root=ROOT, lock_dir_rel=
                 D=dict(self_site_exposure=True, decoder_ffn_frozen=True),
             ),
             frozen_parameters=list(FFN_NAMES),
-            window=[6001, 8000],
+            window=[6001, STAGES[-1]],
             stages=list(STAGES),
             observed_checkpoints=[6000, *STAGES],
-            decision_step=8000,
+            decision_step=STAGES[-1],
             optimizer="Adam",
             lr=0.001,
             dtype="float64",
@@ -511,12 +496,12 @@ def build_lock_payload(replay_report, preflight_report, root=ROOT, lock_dir_rel=
             cycle_lengths=[3, 4, 5, 6],
             batches_by_length={"3": 210, "4": 168, "5": 140, "6": 120},
             targets_per_update=840,
-            updates_per_cell=2000,
-            examples_per_cell=319000,
-            targets_per_cell=1680000,
-            quartet_max_updates=8000,
-            quartet_max_examples=1276000,
-            quartet_max_targets=6720000,
+            updates_per_cell=per_arm_updates,
+            examples_per_cell=per_arm_examples,
+            targets_per_cell=per_arm_targets,
+            quartet_max_updates=4 * per_arm_updates,
+            quartet_max_examples=4 * per_arm_examples,
+            quartet_max_targets=4 * per_arm_targets,
             ab_counts_against_quartet_max=True,
         ),
         gates=dict(
@@ -532,10 +517,52 @@ def build_lock_payload(replay_report, preflight_report, root=ROOT, lock_dir_rel=
             secondary_length8_groups=["distinct", "repeated"],
             historical_repair_threshold=0.95,
         ),
+        limitation="Preflight and read-only historical A/B replay locked; requires separate formal runner and explicit execution authorization before running C/D.",
+    )
+
+
+def _exact_json_equal(actual, expected):
+    """Strict structural and type equality for decoded JSON values (distinguishes bool/int/float)."""
+    if type(actual) is not type(expected):
+        return False
+    if isinstance(expected, dict):
+        return set(actual) == set(expected) and all(_exact_json_equal(actual[k], expected[k]) for k in expected)
+    if isinstance(expected, list):
+        return len(actual) == len(expected) and all(_exact_json_equal(a, e) for a, e in zip(actual, expected))
+    return actual == expected
+
+
+def build_lock_payload(replay_report, preflight_report, root=ROOT, lock_dir_rel=f"results/{DEFAULT_LOCK_NAME}"):
+    """Build the frozen lock specification prior to separate formal execution authorization."""
+    study_hashes = {}
+    for rel in STUDY_FILES:
+        target = root / rel
+        require(target.is_file(), f"Missing study file: {rel}")
+        study_hashes[rel] = digest(target)
+
+    contract = canonical_lock_contract()
+    return dict(
+        schema_version=1,
+        status="locked_awaiting_authorization",
+        formal_ready=False,
+        formal_authorized=False,
+        formal_updates=0,
+        output_directory=lock_dir_rel,
+        start_checkpoint=contract["start_checkpoint"],
+        data_file=contract["data_file"],
+        ab_replay_source=contract["ab_replay_source"],
+        ab_replay_passed=replay_report["passed"],
+        ab_replay_bitwise_exact=replay_report["bitwise_exact_all"],
+        ab_replay_eval_cells=replay_report["eval_cells_checked"],
+        preflight_passed=preflight_report["passed"],
+        preflight_fixture_updates=preflight_report["fixture_updates"],
+        environment=replay_report["environment"],
+        budget=contract["budget"],
+        gates=contract["gates"],
         study_hashes=study_hashes,
         historical_artifact_hashes=replay_report["artifact_hashes"],
         protected_hashes=replay_report["protected_hashes"],
-        limitation="Preflight and read-only historical A/B replay locked; requires separate formal runner and explicit execution authorization before running C/D.",
+        limitation=contract["limitation"],
     )
 
 
@@ -636,6 +663,22 @@ def verify_lock_bundle(results_root=None, lock_name=DEFAULT_LOCK_NAME, root=ROOT
             and lock.get("ab_replay_eval_cells") == 126, "Lock A/B replay metadata mismatch")
     require(lock.get("preflight_passed") is True and lock.get("preflight_fixture_updates") == 17,
             "Lock preflight metadata mismatch")
+
+    contract = canonical_lock_contract()
+    for field in ("start_checkpoint", "data_file", "ab_replay_source", "limitation"):
+        require(lock.get(field) == contract[field], f"Lock {field} mismatch")
+    require(_exact_json_equal(lock.get("budget"), contract["budget"]),
+            "Lock budget does not match canonical protocol budget")
+    require(_exact_json_equal(lock.get("gates"), contract["gates"]),
+            "Lock gates do not match canonical protocol gates")
+    require(isinstance(lock.get("environment"), dict) and lock.get("environment") == ab.get("environment"),
+            "Lock environment metadata differs from A/B replay")
+    for env_name, env in (("lock", lock.get("environment")), ("ab_replay", ab.get("environment")),
+                          ("preflight", pre.get("environment"))):
+        require(isinstance(env, dict), f"Missing environment metadata in {env_name}")
+        for key in ("threads", "deterministic_algorithms", "dtype", "device"):
+            require(_exact_json_equal(env.get(key), contract["budget"][key]),
+                    f"Environment setting {key} mismatch in {env_name}")
 
     expected_artifacts = {
         f"{lock_dir_rel}/ab_replay_verification.json",

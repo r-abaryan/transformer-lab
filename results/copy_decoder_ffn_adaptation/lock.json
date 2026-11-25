@@ -126,11 +126,11 @@
     "historical_repair_threshold": 0.95
   },
   "study_hashes": {
-    "docs/protocols/copy-decoder-ffn-adaptation.md": "4264306308be8e9ab4f8121e51d3c2ba718f8b6601673584ffc1eeecc62e6002",
+    "docs/protocols/copy-decoder-ffn-adaptation.md": "59261a5176937c9074866a9aaeb1bbd3b7b230e4c3b3786e55656eec14485874",
     "experiments/copy_decoder_ffn_adaptation.py": "76218ce11448881ee03b380c9a98c7419318f9c02320d3694908f7cb813e4e45",
-    "experiments/prepare_copy_decoder_ffn_adaptation.py": "add68da0c6bee32963b450ff742af0ecc4dfdf8f82d30026fc55f0ce3807d516",
+    "experiments/prepare_copy_decoder_ffn_adaptation.py": "8a6bcbaa9e6af0f83175d4d475a8b302088780aaa7f3ee21d3690351fa3075d1",
     "tests/test_copy_decoder_ffn_adaptation.py": "ca897e09cab17842ea0c7c333b168829c85efb5c9a72b532b55dec1b44a8e6ee",
-    "tests/test_copy_decoder_ffn_lock.py": "08038834e553519ce2f278778d3ab0287353fdaef47f1bedde23c66589c3ca1e"
+    "tests/test_copy_decoder_ffn_lock.py": "c2e1bdb9262954f888cec152959bc90fdc4fab09c0f1822aa82c4e7a76dc59de"
   },
   "historical_artifact_hashes": {
     "results/copy_learning_trajectory/3767_cross_only_6000.pt": "b0a9005852828b4a888467b2677827b6a9ef50d65b9d7cfa238034e7e0b1086c",
@@ -279,7 +279,7 @@
   },
   "limitation": "Preflight and read-only historical A/B replay locked; requires separate formal runner and explicit execution authorization before running C/D.",
   "verification_artifacts": {
-    "results/copy_decoder_ffn_adaptation/ab_replay_verification.json": "6797abaf55d791f3e95611c3c898412a44723ceed0743453af3bffbc2907ca4a",
-    "results/copy_decoder_ffn_adaptation/preflight.json": "946d884e7cfb69b45ce884b3f9031c609108969af5606b45a2f790924486274e"
+    "results/copy_decoder_ffn_adaptation/ab_replay_verification.json": "20f3041ea811c80e11629c52715bf08a39c3ad42c1a3cc34fc7d66e1a0594cfb",
+    "results/copy_decoder_ffn_adaptation/preflight.json": "fc396967e708a7d4197d6c16bfb6d6c6f8eed12464f47ccab5a9fed3133446cc"
   }
 }

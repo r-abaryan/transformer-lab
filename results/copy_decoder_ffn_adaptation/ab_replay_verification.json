@@ -29,7 +29,7 @@
       "position_stream": "63c8dd4e808496a4310e7c180a06863294cea233e4b8b338a5dc43f6f9e0ac87",
       "bitwise_exact": true,
       "max_abs_diff": 0.0,
-      "seconds": 8.55319640005473
+      "seconds": 7.125063000014052
     },
     {
       "arm": "both",
@@ -42,7 +42,7 @@
       "position_stream": "63c8dd4e808496a4310e7c180a06863294cea233e4b8b338a5dc43f6f9e0ac87",
       "bitwise_exact": true,
       "max_abs_diff": 0.0,
-      "seconds": 5.295179300010204
+      "seconds": 6.738738499989267
     },
     {
       "arm": "cross_only",
@@ -55,7 +55,7 @@
       "position_stream": "96d6ea53446a22bfadb7c6aeef05eeeaaf9aa6eb8f85ddf001f940274a4319cb",
       "bitwise_exact": true,
       "max_abs_diff": 0.0,
-      "seconds": 4.79599400004372
+      "seconds": 7.730808800028171
     },
     {
       "arm": "both",
@@ -68,7 +68,7 @@
       "position_stream": "96d6ea53446a22bfadb7c6aeef05eeeaaf9aa6eb8f85ddf001f940274a4319cb",
       "bitwise_exact": true,
       "max_abs_diff": 0.0,
-      "seconds": 4.996312300034333
+      "seconds": 6.81284600001527
     },
     {
       "arm": "cross_only",
@@ -81,7 +81,7 @@
       "position_stream": "85a507d14e01a2f13df1c0f41d02b801143bd776fff043412a5750ee8ddf9960",
       "bitwise_exact": true,
       "max_abs_diff": 0.0,
-      "seconds": 5.049038800003473
+      "seconds": 6.772130900004413
     },
     {
       "arm": "both",
@@ -94,7 +94,7 @@
       "position_stream": "85a507d14e01a2f13df1c0f41d02b801143bd776fff043412a5750ee8ddf9960",
       "bitwise_exact": true,
       "max_abs_diff": 0.0,
-      "seconds": 6.861900200019591
+      "seconds": 6.926312700030394
     },
     {
       "arm": "cross_only",
@@ -107,7 +107,7 @@
       "position_stream": "fb87dd05184aa1d5bdfdbb703c5de2fc1a3aa51037b43639c1a62ff20fc45332",
       "bitwise_exact": true,
       "max_abs_diff": 0.0,
-      "seconds": 6.686682200001087
+      "seconds": 6.685219799983315
     },
     {
       "arm": "both",
@@ -120,7 +120,7 @@
       "position_stream": "fb87dd05184aa1d5bdfdbb703c5de2fc1a3aa51037b43639c1a62ff20fc45332",
       "bitwise_exact": true,
       "max_abs_diff": 0.0,
-      "seconds": 6.382078800001182
+      "seconds": 6.565268200007267
     }
   ],
   "lineage_protected_files": 116,
@@ -274,24 +274,24 @@
       "available": true,
       "platform": "win32",
       "method": "GetProcessMemoryInfo/PROCESS_MEMORY_COUNTERS_EX",
-      "peak_working_set_bytes": 589910016,
-      "working_set_bytes": 589910016,
-      "private_commit_bytes": 1492561920,
-      "peak_private_commit_bytes": 1492561920,
+      "peak_working_set_bytes": 590163968,
+      "working_set_bytes": 590163968,
+      "private_commit_bytes": 1492410368,
+      "peak_private_commit_bytes": 1492410368,
       "scope": "Process-lifetime peaks, including imports, optimizer and evaluation; not an isolated-step increment"
     },
     "after": {
       "available": true,
       "platform": "win32",
       "method": "GetProcessMemoryInfo/PROCESS_MEMORY_COUNTERS_EX",
-      "peak_working_set_bytes": 647045120,
-      "working_set_bytes": 642916352,
-      "private_commit_bytes": 1533366272,
-      "peak_private_commit_bytes": 1537126400,
+      "peak_working_set_bytes": 647921664,
+      "working_set_bytes": 643792896,
+      "private_commit_bytes": 1534283776,
+      "peak_private_commit_bytes": 1538027520,
       "scope": "Process-lifetime peaks, including imports, optimizer and evaluation; not an isolated-step increment"
     }
   },
-  "seconds": 61.400880499975756,
+  "seconds": 69.21000550000463,
   "environment": {
     "python": "3.14.7 (main, Aug 14 2026, 15:39:58) [MSC v.1944 64 bit (AMD64)]",
     "torch": "2.11.0+cu128",

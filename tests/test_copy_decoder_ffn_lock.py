@@ -1,7 +1,9 @@
 """Synthetic regression tests for historical lineage, A/B replay, and exclusive lock creation."""
+import contextlib
 import copy
 import hashlib
 import importlib.util
+import io
 import json
 import os
 import subprocess
@@ -29,6 +31,7 @@ if HAS_TORCH:
         replay_ab,
         replay_segment,
         verify_historical_lineage,
+        verify_lock_bundle,
         verify_pools,
         verify_protected_hashes,
         verify_start_checkpoint,
@@ -329,6 +332,7 @@ class HistoricalVerificationAndLockTests(unittest.TestCase):
             report_path.write_text(original_report, encoding="utf-8")
             audit_path.write_text(original_audit, encoding="utf-8")
             target_ckpt = cont_dir / "3767_cross_only_6004.pt"
+            original_ckpt_bytes = target_ckpt.read_bytes()
             tampered_cp = torch.load(target_ckpt, weights_only=True)
             with torch.no_grad():
                 first_param = next(iter(tampered_cp["model"]))
@@ -338,6 +342,21 @@ class HistoricalVerificationAndLockTests(unittest.TestCase):
             update_report_and_audit(lambda d: d["runs"][0].__setitem__("checkpoint_sha256", new_sha))
             with self.assertRaisesRegex(AssertionError, "Bitwise checkpoint mismatch"):
                 replay_ab(self.root, verify_eval=False)
+
+            # 5. Tampered saved scores (logits and generated) must fail replay_ab and block lock creation.
+            target_ckpt.write_bytes(original_ckpt_bytes)
+            init_scores_path = cont_dir / "3767_cross_only_6000_scores.pt"
+            tampered_scores = torch.load(init_scores_path, weights_only=True)
+            tampered_scores["test_10"]["logits"].add_(0.5)
+            torch.save(tampered_scores, init_scores_path)
+            scores_sha = hashlib.sha256(init_scores_path.read_bytes()).hexdigest()
+            update_report_and_audit(lambda d: d["initial"].__setitem__("scores_sha256", scores_sha))
+            with self.assertRaisesRegex(AssertionError, "Saved argmax mismatch|Saved logit/score tensor mismatch"):
+                replay_ab(self.root, verify_eval=True)
+            with self.assertRaisesRegex(AssertionError, "Saved argmax mismatch|Saved logit/score tensor mismatch"):
+                create_lock(results_root=self.root / "results", lock_name="blocked_lock", root=self.root,
+                            preflight_fn=lambda: dict(passed=True, formal_updates=0))
+            self.assertFalse((self.root / "results/blocked_lock").exists())
 
     def test_create_lock_exclusive_and_protected_checks(self):
         self._write_study_files()
@@ -392,9 +411,165 @@ class HistoricalVerificationAndLockTests(unittest.TestCase):
                 root=self.root,
                 verify_eval=False,
             )
-        with self.assertRaises(SystemExit) as cm:
+        with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit) as cm:
             prep.main(["lock", "--no-eval"])
         self.assertEqual(cm.exception.code, 2)
+
+    def test_late_integrity_failure_leaves_no_published_lock(self):
+        self._write_study_files()
+        protected = self.root / "results/protected.json"
+        protected.parent.mkdir(parents=True, exist_ok=True)
+        protected.write_bytes(b"{}")
+        protected_sha = hashlib.sha256(protected.read_bytes()).hexdigest()
+
+        fake_replay = dict(
+            passed=True,
+            bitwise_exact_all=True,
+            eval_cells_checked=126,
+            artifact_hashes={"results/protected.json": protected_sha},
+            protected_hashes={"results/protected.json": protected_sha},
+            environment=dict(python="3.14", torch="test", dtype="float64", device="cpu"),
+        )
+        fake_preflight = dict(passed=True, formal_updates=0, fixture_updates=17)
+
+        def fail_protected(root, mapping):
+            raise AssertionError("Simulated late protected hash mismatch")
+
+        with patch.object(prep, "verify_protected_hashes", side_effect=fail_protected):
+            with self.assertRaisesRegex(AssertionError, "Simulated late protected hash mismatch"):
+                create_lock(
+                    results_root=self.root / "results",
+                    lock_name="copy_decoder_ffn_adaptation",
+                    root=self.root,
+                    replay_fn=lambda _: fake_replay,
+                    preflight_fn=lambda: fake_preflight,
+                )
+
+        lock_dir = self.root / "results/copy_decoder_ffn_adaptation"
+        self.assertFalse((lock_dir / "lock.json").exists())
+        self.assertFalse(lock_dir.exists())
+        self.assertEqual([p.name for p in (self.root / "results").iterdir()], ["protected.json"])
+
+        # Retrying at the exact same path succeeds once the integrity check passes.
+        retry = create_lock(
+            results_root=self.root / "results",
+            lock_name="copy_decoder_ffn_adaptation",
+            root=self.root,
+            replay_fn=lambda _: fake_replay,
+            preflight_fn=lambda: fake_preflight,
+        )
+        self.assertTrue(retry["passed"])
+        self.assertTrue((lock_dir / "lock.json").is_file())
+
+    def test_verify_lock_bundle_accepts_valid_and_rejects_tampering(self):
+        self._write_study_files()
+        protected = self.root / "results/protected.json"
+        protected.parent.mkdir(parents=True, exist_ok=True)
+        protected.write_bytes(b"{}")
+        protected_sha = hashlib.sha256(protected.read_bytes()).hexdigest()
+
+        stage_records = [
+            dict(
+                arm=arm,
+                begin=step - prep.STAGE_UPDATES,
+                step=step,
+                updates=prep.STAGE_UPDATES,
+                examples=prep.STAGE_EXAMPLES,
+                targets=prep.STAGE_TARGETS,
+                stream=f"stream_{step}",
+                position_stream=f"pstream_{step}",
+                bitwise_exact=True,
+                max_abs_diff=0.0,
+                seconds=1.0,
+            )
+            for step in prep.STAGES
+            for arm in prep.ARMS
+        ]
+        fake_replay = dict(
+            passed=True,
+            formal_ready=False,
+            formal_updates=0,
+            replayed_arms=list(prep.ARMS),
+            stages=list(prep.STAGES),
+            replayed_updates_per_arm=len(prep.STAGES) * prep.STAGE_UPDATES,
+            replayed_updates_total=len(prep.ARMS) * len(prep.STAGES) * prep.STAGE_UPDATES,
+            bitwise_exact_all=True,
+            eval_cells_checked=126,
+            stage_records=stage_records,
+            lineage_protected_files=1,
+            artifact_hashes={"results/protected.json": protected_sha},
+            protected_hashes={"results/protected.json": protected_sha},
+            environment=dict(python="3.14", torch="test", dtype="float64", device="cpu"),
+        )
+        fake_preflight = dict(
+            passed=True,
+            formal_ready=False,
+            formal_updates=0,
+            fixture_updates=17,
+            profiles=[{}] * 16,
+            audit_cells=10,
+            checks=dict(saved_initialized_evaluator_and_audit=True),
+        )
+        create_lock(
+            results_root=self.root / "results",
+            lock_name="copy_decoder_ffn_adaptation",
+            root=self.root,
+            replay_fn=lambda _: fake_replay,
+            preflight_fn=lambda: fake_preflight,
+        )
+
+        summary = verify_lock_bundle(results_root=self.root / "results", lock_name="copy_decoder_ffn_adaptation", root=self.root)
+        self.assertTrue(summary["passed"])
+        self.assertEqual(summary["stage_records"], 8)
+        self.assertEqual(summary["ab_replay_eval_cells"], 126)
+
+        lock_dir = self.root / "results/copy_decoder_ffn_adaptation"
+        study_file = self.root / STUDY_FILES[0]
+        original_study = study_file.read_bytes()
+        study_file.write_bytes(b"modified protocol")
+        with self.assertRaisesRegex(AssertionError, "SHA-256 mismatch"):
+            verify_lock_bundle(results_root=self.root / "results", lock_name="copy_decoder_ffn_adaptation", root=self.root)
+        study_file.write_bytes(original_study)
+
+        extra = lock_dir / "unexpected.json"
+        extra.write_text("{}", encoding="utf-8")
+        with self.assertRaisesRegex(AssertionError, "Unexpected lock directory contents"):
+            verify_lock_bundle(results_root=self.root / "results", lock_name="copy_decoder_ffn_adaptation", root=self.root)
+        extra.unlink()
+
+        pre_path = lock_dir / "preflight.json"
+        original_pre = pre_path.read_bytes()
+        pre_path.write_text(json.dumps(dict(fake_preflight, fixture_updates=16)), encoding="utf-8")
+        with self.assertRaisesRegex(AssertionError, "SHA-256 mismatch"):
+            verify_lock_bundle(results_root=self.root / "results", lock_name="copy_decoder_ffn_adaptation", root=self.root)
+        pre_path.write_bytes(original_pre)
+
+        lock_path = lock_dir / "lock.json"
+        original_lock = lock_path.read_bytes()
+        bad_lock = json.loads(original_lock)
+        bad_lock["formal_updates"] = 1
+        lock_path.write_text(json.dumps(bad_lock), encoding="utf-8")
+        with self.assertRaisesRegex(AssertionError, "zero formal updates"):
+            verify_lock_bundle(results_root=self.root / "results", lock_name="copy_decoder_ffn_adaptation", root=self.root)
+        lock_path.write_bytes(original_lock)
+
+        ab_path = lock_dir / "ab_replay_verification.json"
+        bad_ab = copy.deepcopy(fake_replay)
+        bad_ab["eval_cells_checked"] = 125
+        ab_path.write_text(json.dumps(bad_ab), encoding="utf-8")
+        bad_lock_2 = json.loads(original_lock)
+        bad_lock_2["verification_artifacts"]["results/copy_decoder_ffn_adaptation/ab_replay_verification.json"] = hashlib.sha256(ab_path.read_bytes()).hexdigest()
+        lock_path.write_text(json.dumps(bad_lock_2), encoding="utf-8")
+        with self.assertRaisesRegex(AssertionError, "evaluated cell count mismatch"):
+            verify_lock_bundle(results_root=self.root / "results", lock_name="copy_decoder_ffn_adaptation", root=self.root)
+
+    def test_optimized_mode_rejected(self):
+        script = str(ROOT / "experiments/prepare_copy_decoder_ffn_adaptation.py")
+        for action in ("verify-lock", "lock"):
+            with self.subTest(action=action):
+                proc = subprocess.run([sys.executable, "-O", script, action], capture_output=True, text=True)
+                self.assertNotEqual(proc.returncode, 0)
+                self.assertIn("optimized mode", proc.stderr)
 
     @unittest.skipUnless(os.name == "nt", "Native Windows junction test")
     def test_create_lock_rejects_windows_junction_output(self):

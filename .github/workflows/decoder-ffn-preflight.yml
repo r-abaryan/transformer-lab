@@ -7,6 +7,8 @@ on:
       - 'docs/protocols/copy-decoder-ffn-adaptation.md'
       - 'experiments/copy_decoder_ffn_adaptation.py'
       - 'experiments/prepare_copy_decoder_ffn_adaptation.py'
+      - 'results/copy_decoder_ffn_adaptation/**'
+      - 'tests/safe_runner.py'
       - 'tests/test_copy_decoder_ffn_adaptation.py'
       - 'tests/test_copy_decoder_ffn_lock.py'
       - 'requirements-cpu.txt'
@@ -17,6 +19,8 @@ on:
       - 'docs/protocols/copy-decoder-ffn-adaptation.md'
       - 'experiments/copy_decoder_ffn_adaptation.py'
       - 'experiments/prepare_copy_decoder_ffn_adaptation.py'
+      - 'results/copy_decoder_ffn_adaptation/**'
+      - 'tests/safe_runner.py'
       - 'tests/test_copy_decoder_ffn_adaptation.py'
       - 'tests/test_copy_decoder_ffn_lock.py'
       - 'requirements-cpu.txt'
@@ -82,8 +86,11 @@ jobs:
                   raise RuntimeError('Checked-out commit does not match PR head')
               paths = ['requirements-cpu.txt', 'docs/protocols/copy-decoder-ffn-adaptation.md',
                   'experiments/copy_decoder_ffn_adaptation.py', 'experiments/prepare_copy_decoder_ffn_adaptation.py',
-                  'tests/test_copy_decoder_ffn_adaptation.py', 'tests/test_copy_decoder_ffn_lock.py',
-                  '.github/workflows/decoder-ffn-preflight.yml']
+                  'results/copy_decoder_ffn_adaptation/ab_replay_verification.json',
+                  'results/copy_decoder_ffn_adaptation/lock.json',
+                  'results/copy_decoder_ffn_adaptation/preflight.json',
+                  'tests/safe_runner.py', 'tests/test_copy_decoder_ffn_adaptation.py',
+                  'tests/test_copy_decoder_ffn_lock.py', '.github/workflows/decoder-ffn-preflight.yml']
               save('source-hashes.json', {p: hashlib.sha256(Path(p).read_bytes()).hexdigest() for p in paths})
               environment['cpu_names'] = execute('cpu', ['powershell', '-NoProfile', '-Command',
                   '(Get-CimInstance Win32_Processor | Select-Object -ExpandProperty Name) -join "; "']).stdout.strip()
@@ -105,9 +112,16 @@ jobs:
                   '-p', 'test_copy_decoder_ffn_lock.py', '-v'])
               lock_output = lock_tests.stdout+'\n'+lock_tests.stderr
               lock_match = re.search(r'^Ran (\d+) tests? in ', lock_output, re.MULTILINE)
-              if not lock_match or int(lock_match.group(1)) < 8 or not re.search(r'^OK\s*$', lock_output, re.MULTILINE):
+              if not lock_match or int(lock_match.group(1)) < 11 or not re.search(r'^OK\s*$', lock_output, re.MULTILINE):
                   raise RuntimeError('All synthetic lock/replay tests must execute without skips or expected failures')
               save('lock_tests.result.json', dict(tests=int(lock_match.group(1)), passed=int(lock_match.group(1)), failures=0, errors=0, skipped=0))
+              bundle = execute('verify-lock', [sys.executable, 'experiments/prepare_copy_decoder_ffn_adaptation.py', 'verify-lock'])
+              bundle_report = json.loads(bundle.stdout)
+              save('verify-lock.json', bundle_report)
+              if not (bundle_report.get('passed') is True and bundle_report.get('formal_ready') is False
+                  and bundle_report.get('formal_authorized') is False and bundle_report.get('formal_updates') == 0
+                  and bundle_report.get('ab_replay_eval_cells') == 126 and bundle_report.get('stage_records') == 8):
+                  raise RuntimeError('Committed lock bundle contract mismatch')
               run = execute('preflight', [sys.executable, 'experiments/copy_decoder_ffn_adaptation.py', 'preflight'])
               report = json.loads(run.stdout)
               save('preflight.json', report)

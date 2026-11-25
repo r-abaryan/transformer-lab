@@ -3,10 +3,12 @@ import argparse
 import copy
 import hashlib
 import json
+import os
 import platform
 import struct
 import sys
 import time
+import uuid
 from pathlib import Path
 
 import torch
@@ -30,8 +32,14 @@ from copy_decoder_ffn_adaptation import (
     targets,
 )
 from copy_position_sites import digest, evaluate, forward, inputs, make_model, positions, sample, write
-from safe_runner import fresh_directory, validate_target
-from validate_copy_exposure_continuation import COUNTS, validate_directory
+from safe_runner import checked_directory, fresh_directory, validate_target
+from validate_copy_exposure_continuation import COUNTS, decode_json, validate_directory
+
+
+def require_debug_assertions():
+    """Fail closed when Python -O disables assert statements inside frozen historical auditors."""
+    if not __debug__:
+        raise RuntimeError("Python -O / optimized mode is not permitted; required audit assertions would be disabled.")
 
 ARMS = ("cross_only", "both")
 STAGES = (6500, 7000, 7500, 8000)
@@ -161,6 +169,7 @@ def verify_protected_hashes(root, mapping):
 
 def verify_historical_lineage(root=ROOT):
     """Read-only verification of historical continuation artifacts, protected hashes, pools, and start checkpoint."""
+    require_debug_assertions()
     root = Path(root)
     cont_dir = root / CONTINUATION_REL
     start_path = root / START_REL
@@ -307,8 +316,37 @@ def _max_tensor_diff(a, b):
     return 0.0
 
 
+def _audit_saved_eval(model, eval_pools, saved_scores, expected_metrics, context_label):
+    """Verify evaluated metrics and saved score tensors with non-strippable checks plus independent audit_cell."""
+    require_debug_assertions()
+    cells = 0
+    max_error = 0.0
+    model.eval()
+    for pool_name, rows in eval_pools.items():
+        require(pool_name in saved_scores and pool_name in expected_metrics,
+                f"Missing saved score pool {pool_name} in {context_label}")
+        metrics, actual_saved = evaluate(model, rows, "cross_only")
+        require(metrics == expected_metrics[pool_name], f"Eval metrics mismatch for {context_label}/{pool_name}")
+        stored = saved_scores[pool_name]
+        require(actual_saved["generated"] == stored["generated"],
+                f"Saved generated sequences mismatch for {context_label}/{pool_name}")
+        require(torch.equal(actual_saved["logits"].argmax(-1), stored["logits"].argmax(-1)),
+                f"Saved argmax mismatch for {context_label}/{pool_name}")
+        logit_diff = float((actual_saved["logits"] - stored["logits"]).abs().max())
+        score_diff = float((actual_saved["scores"] - stored["scores"]).abs().max())
+        require(logit_diff <= 1e-9 and score_diff <= 1e-9,
+                f"Saved logit/score tensor mismatch for {context_label}/{pool_name}")
+        err, metric_err = audit_cell(model, rows, None, "cross_only", stored, metrics)
+        require(isinstance(err, float) and err <= 1e-9 and isinstance(metric_err, float) and metric_err <= 1e-9,
+                f"Reference audit tolerance exceeded for {context_label}/{pool_name}")
+        max_error = max(max_error, err, logit_diff, score_diff)
+        cells += 1
+    return cells, max_error
+
+
 def replay_ab(root=ROOT, verify_eval=True):
     """Verify exact A/B historical continuation replay (steps 6001-8000) without mutating frozen artifacts."""
+    require_debug_assertions()
     tick = time.perf_counter()
     memory_before = process_memory()
     root = Path(root)
@@ -324,14 +362,12 @@ def replay_ab(root=ROOT, verify_eval=True):
     max_eval_ref_error = 0.0
     if verify_eval:
         init_model, _, _ = restore(start_cp, lambda: make_model("rope"), frozen=False)
-        init_model.eval()
         init_scores = torch.load(root / _norm_rel(report["initial"]["scores"]), weights_only=True)
-        for pool_name, rows in eval_pools.items():
-            metrics, _ = evaluate(init_model, rows, "cross_only")
-            require(metrics == report["initial"]["metrics"][pool_name], f"Initial metrics mismatch: {pool_name}")
-            err, _ = audit_cell(init_model, rows, None, "cross_only", init_scores[pool_name], metrics)
-            max_eval_ref_error = max(max_eval_ref_error, err)
-            eval_cells += 1
+        cells, err = _audit_saved_eval(
+            init_model, eval_pools, init_scores, report["initial"]["metrics"], "initial@6000"
+        )
+        eval_cells += cells
+        max_eval_ref_error = max(max_eval_ref_error, err)
 
     stage_records = []
     arm_states = {}
@@ -365,15 +401,12 @@ def replay_ab(root=ROOT, verify_eval=True):
             prior_sha[arm] = expected_run["checkpoint_sha256"]
 
             if verify_eval:
-                state["model"].eval()
                 saved_scores = torch.load(root / _norm_rel(expected_run["evaluation"]["scores"]), weights_only=True)
-                for pool_name, rows in eval_pools.items():
-                    metrics, _ = evaluate(state["model"], rows, "cross_only")
-                    require(metrics == expected_run["evaluation"]["metrics"][pool_name],
-                            f"Eval metrics mismatch for {arm}@{stop}/{pool_name}")
-                    err, _ = audit_cell(state["model"], rows, None, "cross_only", saved_scores[pool_name], metrics)
-                    max_eval_ref_error = max(max_eval_ref_error, err)
-                    eval_cells += 1
+                cells, err = _audit_saved_eval(
+                    state["model"], eval_pools, saved_scores, expected_run["evaluation"]["metrics"], f"{arm}@{stop}"
+                )
+                eval_cells += cells
+                max_eval_ref_error = max(max_eval_ref_error, err)
 
             record = dict(
                 arm=arm,
@@ -508,7 +541,8 @@ def build_lock_payload(replay_report, preflight_report, root=ROOT, lock_dir_rel=
 
 def create_lock(results_root=None, lock_name=DEFAULT_LOCK_NAME, root=ROOT, verify_eval=True,
                 replay_fn=None, preflight_fn=None):
-    """Verify historical lineage, exact A/B replay, and preflight, then write exclusive lock artifacts."""
+    """Verify historical lineage, exact A/B replay, and preflight, then atomically publish lock artifacts."""
+    require_debug_assertions()
     require(verify_eval is True, "create_lock requires saved-score evaluation audit")
     base = Path(root).resolve(strict=True) / "results" if results_root is None else Path(results_root)
     root, _, target = validate_target(base, lock_name, root=root)
@@ -526,40 +560,165 @@ def create_lock(results_root=None, lock_name=DEFAULT_LOCK_NAME, root=ROOT, verif
 
     lock_payload = build_lock_payload(replay_report, preflight_report, root=root, lock_dir_rel=lock_dir_rel)
 
-    # Create the exclusive contained directory only after all read-only verifications succeed.
-    out_dir = fresh_directory(base, lock_name, root=root)
-    replay_path = out_dir / "ab_replay_verification.json"
-    preflight_path = out_dir / "preflight.json"
-    lock_path = out_dir / "lock.json"
-    write(replay_path, replay_report)
-    write(preflight_path, preflight_report)
-    lock_payload["verification_artifacts"] = {
-        f"{lock_dir_rel}/ab_replay_verification.json": digest(replay_path),
-        f"{lock_dir_rel}/preflight.json": digest(preflight_path),
-    }
-    write(lock_path, lock_payload)
+    staging_name = f"tmp_staging_{uuid.uuid4().hex[:12]}"
+    staging_dir = fresh_directory(base, staging_name, root=root)
+    replay_path = staging_dir / "ab_replay_verification.json"
+    preflight_path = staging_dir / "preflight.json"
+    tmp_lock = staging_dir / ".lock.json.tmp"
+    staged_lock = staging_dir / "lock.json"
+    published = False
+    try:
+        write(replay_path, replay_report)
+        write(preflight_path, preflight_report)
+        lock_payload["verification_artifacts"] = {
+            f"{lock_dir_rel}/ab_replay_verification.json": digest(replay_path),
+            f"{lock_dir_rel}/preflight.json": digest(preflight_path),
+        }
+        # Re-verify protected and study hashes after writing evidence and before publishing lock.json.
+        verify_protected_hashes(root, replay_report["protected_hashes"])
+        verify_protected_hashes(root, lock_payload["study_hashes"])
+        write(tmp_lock, lock_payload)
+        os.replace(tmp_lock, staged_lock)
+        validate_target(base, lock_name, root=root)
+        staging_dir.rename(target)
+        published = True
+    finally:
+        if not published and staging_dir.exists():
+            for name in (".lock.json.tmp", "lock.json", "ab_replay_verification.json", "preflight.json"):
+                candidate = staging_dir / name
+                if candidate.is_file():
+                    candidate.unlink()
+            staging_dir.rmdir()
 
-    verify_protected_hashes(root, replay_report["protected_hashes"])
+    final_replay = target / "ab_replay_verification.json"
+    final_preflight = target / "preflight.json"
+    final_lock = target / "lock.json"
     return dict(
         passed=True,
         formal_ready=False,
         formal_authorized=False,
         formal_updates=0,
-        lock_directory=str(out_dir.relative_to(root).as_posix()),
-        lock_sha256=digest(lock_path),
-        ab_replay_sha256=digest(replay_path),
-        preflight_sha256=digest(preflight_path),
+        lock_directory=str(target.relative_to(root).as_posix()),
+        lock_sha256=digest(final_lock),
+        ab_replay_sha256=digest(final_replay),
+        preflight_sha256=digest(final_preflight),
+    )
+
+
+def verify_lock_bundle(results_root=None, lock_name=DEFAULT_LOCK_NAME, root=ROOT):
+    """Read-only verification of committed lock.json, evidence artifacts, and study source hashes."""
+    require_debug_assertions()
+    root = Path(root).resolve(strict=True)
+    base = root / "results" if results_root is None else Path(results_root)
+    checked_directory(root)
+    checked_directory(base)
+    lock_dir = base / lock_name
+    checked_directory(lock_dir)
+    lock_dir_rel = lock_dir.relative_to(root).as_posix()
+
+    expected_names = ["ab_replay_verification.json", "lock.json", "preflight.json"]
+    actual_entries = sorted(p.name for p in lock_dir.iterdir())
+    require(actual_entries == expected_names, f"Unexpected lock directory contents: {actual_entries}")
+    for name in expected_names:
+        require((lock_dir / name).is_file(), f"Lock artifact must be a regular file: {name}")
+
+    lock = decode_json((lock_dir / "lock.json").read_text(encoding="utf-8"))
+    ab = decode_json((lock_dir / "ab_replay_verification.json").read_text(encoding="utf-8"))
+    pre = decode_json((lock_dir / "preflight.json").read_text(encoding="utf-8"))
+    require(all(isinstance(x, dict) for x in (lock, ab, pre)), "Lock bundle files must be JSON objects")
+
+    require(lock.get("schema_version") == 1, "Unsupported lock schema_version")
+    require(lock.get("status") == "locked_awaiting_authorization", "Unexpected lock status")
+    require(lock.get("formal_ready") is False and lock.get("formal_authorized") is False
+            and lock.get("formal_updates") == 0, "Lock must enforce zero formal updates and false authorization")
+    require(lock.get("output_directory") == lock_dir_rel, "Lock output_directory mismatch")
+    require(lock.get("ab_replay_passed") is True and lock.get("ab_replay_bitwise_exact") is True
+            and lock.get("ab_replay_eval_cells") == 126, "Lock A/B replay metadata mismatch")
+    require(lock.get("preflight_passed") is True and lock.get("preflight_fixture_updates") == 17,
+            "Lock preflight metadata mismatch")
+
+    expected_artifacts = {
+        f"{lock_dir_rel}/ab_replay_verification.json",
+        f"{lock_dir_rel}/preflight.json",
+    }
+    require(isinstance(lock.get("verification_artifacts"), dict)
+            and set(lock["verification_artifacts"]) == expected_artifacts,
+            "Unexpected verification_artifacts keys in lock.json")
+    verify_protected_hashes(root, lock["verification_artifacts"])
+
+    require(isinstance(lock.get("study_hashes"), dict) and set(lock["study_hashes"]) == set(STUDY_FILES),
+            "Unexpected study_hashes keys in lock.json")
+    verify_protected_hashes(root, lock["study_hashes"])
+
+    require(ab.get("passed") is True and ab.get("formal_ready") is False and ab.get("formal_updates") == 0,
+            "Invalid A/B replay flags")
+    require(ab.get("replayed_arms") == list(ARMS) and ab.get("stages") == list(STAGES),
+            "A/B replay arms or stages mismatch")
+    require(ab.get("replayed_updates_per_arm") == len(STAGES) * STAGE_UPDATES
+            and ab.get("replayed_updates_total") == len(ARMS) * len(STAGES) * STAGE_UPDATES,
+            "A/B replay update counts mismatch")
+    require(ab.get("bitwise_exact_all") is True and ab.get("eval_cells_checked") == 126,
+            "A/B replay exactness or evaluated cell count mismatch")
+
+    stage_records = ab.get("stage_records")
+    require(isinstance(stage_records, list) and len(stage_records) == len(ARMS) * len(STAGES),
+            "Expected eight A/B stage records")
+    seen_pairs = {}
+    for rec in stage_records:
+        require(isinstance(rec, dict), "Stage record must be an object")
+        pair = (rec.get("arm"), rec.get("step"))
+        require(pair[0] in ARMS and pair[1] in STAGES and pair not in seen_pairs,
+                f"Invalid or duplicate stage record: {pair}")
+        require(rec.get("updates") == STAGE_UPDATES and rec.get("examples") == STAGE_EXAMPLES
+                and rec.get("targets") == STAGE_TARGETS, f"Stage record counts mismatch: {pair}")
+        require(rec.get("bitwise_exact") is True and rec.get("max_abs_diff") == 0.0,
+                f"Stage record not bitwise exact: {pair}")
+        seen_pairs[pair] = rec
+    for stop in STAGES:
+        require(seen_pairs[("cross_only", stop)]["stream"] == seen_pairs[("both", stop)]["stream"]
+                and seen_pairs[("cross_only", stop)]["position_stream"] == seen_pairs[("both", stop)]["position_stream"],
+                f"Paired stream mismatch in lock bundle at {stop}")
+
+    require(isinstance(lock.get("protected_hashes"), dict) and len(lock["protected_hashes"]) > 0,
+            "Missing protected_hashes in lock.json")
+    require(ab.get("artifact_hashes") == lock.get("historical_artifact_hashes")
+            and ab.get("protected_hashes") == lock.get("protected_hashes")
+            and ab.get("lineage_protected_files") == len(lock["protected_hashes"]),
+            "A/B replay manifest hashes differ from lock.json")
+
+    require(pre.get("passed") is True and pre.get("formal_ready") is False
+            and pre.get("formal_updates") == 0 and pre.get("fixture_updates") == 17,
+            "Invalid preflight flags in lock bundle")
+    require(isinstance(pre.get("profiles"), list) and len(pre["profiles"]) == 16
+            and pre.get("audit_cells") == 10, "Invalid preflight profile/audit counts")
+    require(isinstance(pre.get("checks"), dict) and bool(pre["checks"])
+            and all(v is True for v in pre["checks"].values()), "Incomplete preflight checks")
+
+    return dict(
+        passed=True,
+        formal_ready=False,
+        formal_authorized=False,
+        formal_updates=0,
+        lock_directory=lock_dir_rel,
+        ab_replay_eval_cells=ab["eval_cells_checked"],
+        stage_records=len(stage_records),
+        protected_files=len(lock["protected_hashes"]),
+        study_files=len(STUDY_FILES),
+        lock_sha256=digest(lock_dir / "lock.json"),
+        ab_replay_sha256=digest(lock_dir / "ab_replay_verification.json"),
+        preflight_sha256=digest(lock_dir / "preflight.json"),
     )
 
 
 def main(argv=None):
+    require_debug_assertions()
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("action", choices=("verify-history", "replay-ab", "lock"))
+    parser.add_argument("action", choices=("verify-history", "replay-ab", "lock", "verify-lock"))
     parser.add_argument("--no-eval", action="store_true", help="Skip saved-score eval audit during replay-ab")
     parser.add_argument("--save-run-name", default=None,
                         help="Optional fresh folder under results/test_runs/ to write replay-ab output")
     parser.add_argument("--lock-name", default=DEFAULT_LOCK_NAME,
-                        help="Exclusive directory name under results/ when running lock")
+                        help="Exclusive directory name under results/ when running lock or verify-lock")
     args = parser.parse_args(argv)
     if args.no_eval and args.action != "replay-ab":
         parser.error("--no-eval is only supported with replay-ab, never lock")
@@ -578,6 +737,11 @@ def main(argv=None):
             dest_dir = fresh_directory(ROOT / "results/test_runs", args.save_run_name, root=ROOT)
             write(dest_dir / "ab_replay_verification.json", result)
             result = dict(result, saved_report=str((dest_dir / "ab_replay_verification.json").relative_to(ROOT).as_posix()))
+        print(json.dumps(result, indent=2, allow_nan=False))
+        return 0
+
+    if args.action == "verify-lock":
+        result = verify_lock_bundle(lock_name=args.lock_name, root=ROOT)
         print(json.dumps(result, indent=2, allow_nan=False))
         return 0
 

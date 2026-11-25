@@ -4,7 +4,7 @@ __pycache__/
 .uv-cache/
 .parquet-reader/
 results/test_runs/
-
+uv.lock
 # Retained temporary fixtures from historical test runs.
 /results/tmp*/
 

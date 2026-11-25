@@ -1,0 +1,268 @@
+{
+  "passed": true,
+  "formal_ready": false,
+  "formal_updates": 0,
+  "fixture_updates": 17,
+  "profiles": [
+    {
+      "frozen": false,
+      "self_exposure": false,
+      "length": 3,
+      "batch": 210,
+      "targets": 840,
+      "loss": 2.9366331200007414,
+      "step_seconds": 0.015923499944619834,
+      "parameter_bytes": 15104,
+      "optimizer_bytes": 30340
+    },
+    {
+      "frozen": false,
+      "self_exposure": false,
+      "length": 4,
+      "batch": 168,
+      "targets": 840,
+      "loss": 2.9380964556614746,
+      "step_seconds": 0.014552200038451701,
+      "parameter_bytes": 15104,
+      "optimizer_bytes": 30340
+    },
+    {
+      "frozen": false,
+      "self_exposure": false,
+      "length": 5,
+      "batch": 140,
+      "targets": 840,
+      "loss": 2.9627736031063754,
+      "step_seconds": 0.014286899997387081,
+      "parameter_bytes": 15104,
+      "optimizer_bytes": 30340
+    },
+    {
+      "frozen": false,
+      "self_exposure": false,
+      "length": 6,
+      "batch": 120,
+      "targets": 840,
+      "loss": 2.9328381521276516,
+      "step_seconds": 0.014757699973415583,
+      "parameter_bytes": 15104,
+      "optimizer_bytes": 30340
+    },
+    {
+      "frozen": false,
+      "self_exposure": true,
+      "length": 3,
+      "batch": 210,
+      "targets": 840,
+      "loss": 2.9458129304509666,
+      "step_seconds": 0.014317699999082834,
+      "parameter_bytes": 15104,
+      "optimizer_bytes": 30340
+    },
+    {
+      "frozen": false,
+      "self_exposure": true,
+      "length": 4,
+      "batch": 168,
+      "targets": 840,
+      "loss": 2.936467174743896,
+      "step_seconds": 0.014642400026787072,
+      "parameter_bytes": 15104,
+      "optimizer_bytes": 30340
+    },
+    {
+      "frozen": false,
+      "self_exposure": true,
+      "length": 5,
+      "batch": 140,
+      "targets": 840,
+      "loss": 2.9595247554782205,
+      "step_seconds": 0.013695299974642694,
+      "parameter_bytes": 15104,
+      "optimizer_bytes": 30340
+    },
+    {
+      "frozen": false,
+      "self_exposure": true,
+      "length": 6,
+      "batch": 120,
+      "targets": 840,
+      "loss": 2.9284535426891023,
+      "step_seconds": 0.013920199999120086,
+      "parameter_bytes": 15104,
+      "optimizer_bytes": 30340
+    },
+    {
+      "frozen": true,
+      "self_exposure": false,
+      "length": 3,
+      "batch": 210,
+      "targets": 840,
+      "loss": 2.9366331200007414,
+      "step_seconds": 0.015532699995674193,
+      "parameter_bytes": 15104,
+      "optimizer_bytes": 30340
+    },
+    {
+      "frozen": true,
+      "self_exposure": false,
+      "length": 4,
+      "batch": 168,
+      "targets": 840,
+      "loss": 2.9394457997180004,
+      "step_seconds": 0.015653700043912977,
+      "parameter_bytes": 15104,
+      "optimizer_bytes": 30340
+    },
+    {
+      "frozen": true,
+      "self_exposure": false,
+      "length": 5,
+      "batch": 140,
+      "targets": 840,
+      "loss": 2.96552581402975,
+      "step_seconds": 0.014044499956071377,
+      "parameter_bytes": 15104,
+      "optimizer_bytes": 30340
+    },
+    {
+      "frozen": true,
+      "self_exposure": false,
+      "length": 6,
+      "batch": 120,
+      "targets": 840,
+      "loss": 2.9375577880117185,
+      "step_seconds": 0.01455680001527071,
+      "parameter_bytes": 15104,
+      "optimizer_bytes": 30340
+    },
+    {
+      "frozen": true,
+      "self_exposure": true,
+      "length": 3,
+      "batch": 210,
+      "targets": 840,
+      "loss": 2.9458129304509666,
+      "step_seconds": 0.016683300025761127,
+      "parameter_bytes": 15104,
+      "optimizer_bytes": 30340
+    },
+    {
+      "frozen": true,
+      "self_exposure": true,
+      "length": 4,
+      "batch": 168,
+      "targets": 840,
+      "loss": 2.937802230422565,
+      "step_seconds": 0.01625629997579381,
+      "parameter_bytes": 15104,
+      "optimizer_bytes": 30340
+    },
+    {
+      "frozen": true,
+      "self_exposure": true,
+      "length": 5,
+      "batch": 140,
+      "targets": 840,
+      "loss": 2.962173512618795,
+      "step_seconds": 0.014201900048647076,
+      "parameter_bytes": 15104,
+      "optimizer_bytes": 30340
+    },
+    {
+      "frozen": true,
+      "self_exposure": true,
+      "length": 6,
+      "batch": 120,
+      "targets": 840,
+      "loss": 2.9331464065239734,
+      "step_seconds": 0.014056499989237636,
+      "parameter_bytes": 15104,
+      "optimizer_bytes": 30340
+    }
+  ],
+  "audit_cells": 10,
+  "max_reference_error": 1.0547118733938987e-15,
+  "checks": {
+    "saved_initialized_evaluator_and_audit": true,
+    "supplied_correct_wrong_generations": true,
+    "reference_outputs_and_trainable_gradients": true,
+    "frozen_parameters_and_adam_unchanged": true,
+    "input_gradients_preserved": true,
+    "other_parameters_update": true,
+    "fixture_streams_matched": true,
+    "full_forward_detachment_rejected": true,
+    "optimizer_order_preserved": true,
+    "historical_sampler_fixture": true
+  },
+  "gradient_checks": [
+    {
+      "passed": true,
+      "self_exposure": false,
+      "detached_forward_values_preserved": true,
+      "detachment_rejected": true,
+      "shared_parameters": 29,
+      "max_shared_gradient_error": 0.0
+    },
+    {
+      "passed": true,
+      "self_exposure": true,
+      "detached_forward_values_preserved": true,
+      "detachment_rejected": true,
+      "shared_parameters": 29,
+      "max_shared_gradient_error": 0.0
+    }
+  ],
+  "sampler_fixture": {
+    "passed": true,
+    "updates": 4,
+    "sampler_draw_shape": [
+      2,
+      105
+    ],
+    "stream_sha256": "348be8e5dc05640bd2ffaf17831a082cd659e8cf0a1328b54fc4322a675b2996",
+    "position_stream_sha256": "93fe26c09b2b6c7598c2ce8e0fb4feb8649f6ffd7c7ccd5057a5a39b8e719612",
+    "midstream_restore": true,
+    "reordered_indices_rejected": true,
+    "reversed_positions_rejected": true,
+    "limitation": "Synthetic pools and fixture generators only; not historical checkpoint/pool or A/B trajectory replay"
+  },
+  "memory": {
+    "before": {
+      "available": true,
+      "platform": "win32",
+      "method": "GetProcessMemoryInfo/PROCESS_MEMORY_COUNTERS_EX",
+      "peak_working_set_bytes": 647045120,
+      "working_set_bytes": 640753664,
+      "private_commit_bytes": 1531232256,
+      "peak_private_commit_bytes": 1537126400,
+      "scope": "Process-lifetime peaks, including imports, optimizer and evaluation; not an isolated-step increment"
+    },
+    "after": {
+      "available": true,
+      "platform": "win32",
+      "method": "GetProcessMemoryInfo/PROCESS_MEMORY_COUNTERS_EX",
+      "peak_working_set_bytes": 647045120,
+      "working_set_bytes": 634298368,
+      "private_commit_bytes": 1521983488,
+      "peak_private_commit_bytes": 1537126400,
+      "scope": "Process-lifetime peaks, including imports, optimizer and evaluation; not an isolated-step increment"
+    }
+  },
+  "cpu_peak_process_bytes": 647045120,
+  "gpu_allocated_bytes": null,
+  "gpu_reserved_bytes": null,
+  "largest_batch": 210,
+  "seconds": 1.1416715999948792,
+  "environment": {
+    "python": "3.14.7 (main, Aug 14 2026, 15:39:58) [MSC v.1944 64 bit (AMD64)]",
+    "torch": "2.11.0+cu128",
+    "platform": "Windows-11-10.0.26300-SP0",
+    "cpu": "AMD64 Family 25 Model 116 Stepping 1, AuthenticAMD",
+    "threads": 1,
+    "deterministic_algorithms": true,
+    "dtype": "float64",
+    "device": "cpu"
+  },
+  "limitation": "Initialized fixtures and shared historical model helpers; not saved-pool/checkpoint A/B replay. Peaks cover this process lifetime, not a formal-run upper bound. No formal authorization."
+}

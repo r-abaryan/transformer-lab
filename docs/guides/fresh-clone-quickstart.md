@@ -96,7 +96,10 @@ for the selected suites. No claim is made that every historical test works from 
 
 [CPU](../../requirements-cpu.txt), [GPU](../../requirements-gpu.txt),
 [data](../../requirements-data.txt) and [analysis](../../requirements-analysis.txt)
-requirements record separate environments/dependencies. In particular, the CPU file
+requirements record separate environments/dependencies. [pyproject.toml](../../pyproject.toml)
+exposes those same pinned sets as mutually exclusive `cpu` / `gpu` extras (plus `analysis`
+and `data`) for `uv sync --extra ...`; avoid bare `uv sync` without `--extra` against an
+already-populated `.venv`, as it removes unselected extras. In particular, the CPU file
 records an observed Windows CPython environment, not a universal installation guarantee
 for every platform. Do not install the GPU stack merely to run the lightweight checks.
 

@@ -96,9 +96,15 @@ for the selected suites. No claim is made that every historical test works from 
 
 [CPU](../../requirements-cpu.txt), [GPU](../../requirements-gpu.txt),
 [data](../../requirements-data.txt) and [analysis](../../requirements-analysis.txt)
-requirements record separate environments/dependencies. In particular, the CPU file
-records an observed Windows CPython environment, not a universal installation guarantee
-for every platform. Do not install the GPU stack merely to run the lightweight checks.
+requirements record separate environments/dependencies. [pyproject.toml](../../pyproject.toml)
+exposes those same pinned sets as mutually exclusive `cpu` / `gpu` extras (plus `analysis`
+and `data`) for local `uv sync --extra ...` convenience; `uv.lock` is gitignored (no
+shared resolved `uv.lock` is committed), hosted CI installs via `pip -r requirements-cpu.txt`
+rather than `uv`, and the `uv` path is locally exercised rather than CI-tested. Avoid bare
+`uv sync` without `--extra` against an already-populated `.venv`, as it removes unselected
+extras. In particular, the CPU file records an observed Windows CPython environment, not a
+universal installation guarantee for every platform. Do not install the GPU stack merely to
+run the lightweight checks.
 
 The [.gitignore](../../.gitignore) excludes binary `.pt` checkpoints/tensors, dataset
 copies, logs and selected large dumps. The `results/` directory is therefore not a

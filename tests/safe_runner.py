@@ -37,7 +37,8 @@ def checked_directory(path, *, missing_ok=False):
     return True
 
 
-def fresh_directory(base, name, *, root=None):
+def validate_target(base, name, *, root=None):
+    """Validate run name, containment under root, lstat checks on existing components, and non-existence."""
     if not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_-]{0,79}', name):
         raise ValueError('Run name must be one alphanumeric, underscore or hyphen component.')
     # Only the explicitly trusted checkout root is resolved, never the output path.
@@ -54,6 +55,13 @@ def fresh_directory(base, name, *, root=None):
     parents = [root.joinpath(*parts[:i]) for i in range(1, len(parts) + 1)]
     for path in [*parents, target]:
         checked_directory(path, missing_ok=True)
+    if target.exists():
+        raise FileExistsError(str(target))
+    return root, parents, target
+
+
+def fresh_directory(base, name, *, root=None):
+    _, parents, target = validate_target(base, name, root=root)
     for path in parents:
         if not checked_directory(path, missing_ok=True):
             path.mkdir()

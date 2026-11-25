@@ -89,9 +89,13 @@ checkpoint is loaded. A later runner must separately preserve and verify:
   json.dumps(pos.tolist()).encode(); whitespace/serialization is significant.
 
 Synthetic success does not certify saved pools/checkpoints or A/B trajectories.
-Exact A/B replay remains mandatory before C/D. After separate authorization,
-A/B are the first 4000 of the 8000 quartet updates, not extra unbudgeted runs.
-Stop missing artifacts/mismatches; never regenerate historical evidence.
+Exact A/B replay remains mandatory before C/D. When running historical verification,
+`replay-ab` performs real optimizer steps in memory across 6001-8000 ("read-only"
+refers to preserving all historical files untouched on disk, not zero computation
+or zero replay updates; formal C/D updates remain 0 until separately authorized).
+After separate authorization, A/B are the first 4000 of the 8000 quartet updates,
+not extra unbudgeted runs. Stop missing artifacts/mismatches; never regenerate
+historical evidence.
 
 ## Memory, evidence and later execution
 

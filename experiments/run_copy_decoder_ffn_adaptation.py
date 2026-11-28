@@ -5,7 +5,6 @@ import csv
 import hashlib
 import importlib
 import json
-import os
 import platform
 import struct
 import sys
@@ -52,7 +51,7 @@ from prepare_copy_decoder_ffn_adaptation import (
     verify_lock_bundle,
     verify_protected_hashes,
 )
-from safe_runner import fresh_directory
+from safe_runner import fresh_directory, validate_target
 from validate_copy_exposure_continuation import COUNTS, METRICS, decode_json
 
 RESERVED_OUTPUT_NAMES = frozenset({
@@ -69,7 +68,15 @@ def _audit_dir_relative(out_dir, root):
     return out_dir.relative_to(root).as_posix()
 
 
+def _check_windows_memory(mem_before, mem_after):
+    if sys.platform == "win32":
+        require(mem_before.get("available") and mem_after.get("available")
+                and mem_after.get("peak_working_set_bytes", 0) > 0,
+                "Windows process memory measurement failed")
+
+
 def _paired_summary(rows, first_outputs, second_outputs):
+    require(len(rows) == len(first_outputs) == len(second_outputs), "Paired sequence count mismatch")
     both_pass = rescued = harmed = both_fail = first_ok = second_ok = 0
     for row, seq_a, seq_b in zip(rows, first_outputs, second_outputs):
         target = row + [2]
@@ -125,10 +132,16 @@ def compute_quartet_decision(root, ab_report, cd_report, gates_spec, stages, exp
     ab_lookup = {(r["arm"], r["step"]): r["evaluation"]["metrics"] for r in ab_report["runs"]}
     cd_lookup = {(r["cell"], r["step"]): r["evaluation"]["metrics"] for r in cd_report["runs"]}
     short_failures = []
+    short_passed_by_cell = {c: True for c in ("A", "B", "C", "D")}
     worst_short = 1.0
     for step in [6000, *stages]:
         per_cell = (
-            {c: ab_report["initial"]["metrics"] for c in ("A", "B", "C", "D")}
+            {
+                "A": ab_report["initial"]["metrics"],
+                "B": ab_report["initial"]["metrics"],
+                "C": cd_report["initial"]["metrics"],
+                "D": cd_report["initial"]["metrics"],
+            }
             if step == 6000
             else {"A": ab_lookup[("cross_only", step)], "B": ab_lookup[("both", step)],
                   "C": cd_lookup[("C", step)], "D": cd_lookup[("D", step)]}
@@ -139,6 +152,7 @@ def compute_quartet_decision(root, ab_report, cd_report, gates_spec, stages, exp
                     val = metrics[pool_name][grp]["exact_accuracy"]
                     worst_short = min(worst_short, val)
                     if val < gates_spec["short_preservation_min_accuracy"]:
+                        short_passed_by_cell[cell_name] = False
                         short_failures.append(dict(cell=cell_name, step=step, pool=pool_name, group=grp, exact_accuracy=val))
 
     gen8 = {
@@ -163,13 +177,14 @@ def compute_quartet_decision(root, ab_report, cd_report, gates_spec, stages, exp
         )
 
     repair = {
-        c: all(
+        c: short_passed_by_cell[c] and all(
             runs_final[c]["evaluation"]["metrics"][pool][grp][metric] >= gates_spec["historical_repair_threshold"]
             for pool, grp in (("test_8", "distinct"), ("test_8", "repeated"), ("test_10", "repeated"))
             for metric in ("exact_accuracy", "on_time_eos")
         )
         for c in ("A", "B", "C", "D")
     }
+    contrast_ok = interaction >= gates_spec["material_attenuation_min_gain"] and ab_diff > 0.0
     return dict(
         decision_step=final_step,
         primary=dict(
@@ -178,7 +193,8 @@ def compute_quartet_decision(root, ab_report, cd_report, gates_spec, stages, exp
             d_minus_c=dc_diff,
             interaction=interaction,
             material_attenuation_min_gain=gates_spec["material_attenuation_min_gain"],
-            material_attenuation=interaction >= gates_spec["material_attenuation_min_gain"] and ab_diff > 0.0,
+            contrast_threshold_met=contrast_ok,
+            material_attenuation=contrast_ok and (not short_failures),
             positive_exposure_benefit=ab_diff > 0.0,
             paired=paired10,
         ),
@@ -186,6 +202,7 @@ def compute_quartet_decision(root, ab_report, cd_report, gates_spec, stages, exp
             min_accuracy=gates_spec["short_preservation_min_accuracy"],
             worst_accuracy=worst_short,
             passed=not short_failures,
+            passed_by_cell=short_passed_by_cell,
             failures=short_failures,
         ),
         secondary_length8=len8,
@@ -287,8 +304,9 @@ def train_frozen_segment(model, opt, gen, pg, train_pools, begin_step, stop_step
 
 
 def runner_preflight(root=ROOT, lock_name=DEFAULT_LOCK_NAME, check_lock=True, save_dir=None):
-    """Exercise evaluator, independent audit entry, supplied logits, reload path, and freeze error controls (0 formal updates)."""
+    """Exercise evaluator, independent audit entry, supplied logits, reload path, and freeze error controls."""
     require_debug_assertions()
+    audit_mod.validate_lock_name(lock_name)
     tick = time.perf_counter()
     mem_before = process_memory()
     root = Path(root).resolve(strict=True)
@@ -315,7 +333,7 @@ def runner_preflight(root=ROOT, lock_name=DEFAULT_LOCK_NAME, check_lock=True, sa
         loaded_scores = torch.load(scores_path, weights_only=True)
         err, merr = reloaded_auditor.audit_supplied_cell(reloaded_model, rows, "cross_only", loaded_scores, metrics)
 
-        # Missing group and wrong generated/logit negative controls on independent audit entry.
+        # Missing group and wrong generated/logit/scores negative controls on independent audit entry.
         missing_group_metrics = copy.deepcopy(metrics)
         missing_group_metrics.pop("distinct")
         try:
@@ -334,6 +352,11 @@ def runner_preflight(root=ROOT, lock_name=DEFAULT_LOCK_NAME, check_lock=True, sa
         bad_logits["logits"].add_(1.0)
         rejects(lambda: reloaded_auditor.audit_supplied_cell(reloaded_model, rows, "cross_only", bad_logits, metrics))
 
+        bad_scores = copy.deepcopy(loaded_scores)
+        bad_scores["scores"] = bad_scores["scores"].clone()
+        bad_scores["scores"].add_(1.0)
+        rejects(lambda: reloaded_auditor.audit_supplied_cell(reloaded_model, rows, "cross_only", bad_scores, metrics))
+
         # Supplied logits scoring check for correct vs wrong generations.
         labels = torch.tensor([r + [2] for r in rows])
         logits = torch.full((2, 4, 16), -8.0, dtype=torch.float64)
@@ -342,17 +365,23 @@ def runner_preflight(root=ROOT, lock_name=DEFAULT_LOCK_NAME, check_lock=True, sa
         for is_correct in (True, False):
             gen_seqs = [r + [2] for r in rows] if is_correct else [[2], [2]]
             sup_metrics = measures(rows, logits, scores, gen_seqs)
-            reloaded_auditor.close(reloaded_auditor.own_measures(rows, logits, scores, gen_seqs), sup_metrics)
+            reloaded_auditor._strict_close(reloaded_auditor.own_measures(rows, logits, scores, gen_seqs), sup_metrics, "supplied")
             require(sup_metrics["all"]["exact_accuracy"] == int(is_correct), "Supplied logit scoring mismatch")
+
+        # Self-exposure wiring must diverge from cross-only in forward pass and trained updates.
+        x_t = torch.tensor(rows)
+        prefix, labels_t = inputs(x_t)
+        pos_t = torch.tensor([0, 3, 7, 10])
+        with torch.no_grad():
+            z_cross = forward(reloaded_model, x_t, prefix, None, pos_t)[0]
+            z_self = forward(reloaded_model, x_t, prefix, pos_t, pos_t)[0]
+            require(float((z_self - z_cross).abs().max()) > 1e-5, "Self-exposure forward logits failed to diverge")
 
         # Freeze, Adam moment/step tampering, and gradient detachment negative controls.
         warm_model = factory()
         warm_opt = torch.optim.Adam(warm_model.parameters(), lr=0.001)
-        x_t = torch.tensor(rows)
-        prefix, labels_t = inputs(x_t)
         warm_opt.zero_grad(set_to_none=True)
-        F.cross_entropy(forward(warm_model, x_t, prefix, None, torch.tensor([0, 3, 7, 10]))[0].flatten(0, 1),
-                        labels_t.flatten()).backward()
+        F.cross_entropy(forward(warm_model, x_t, prefix, None, pos_t)[0].flatten(0, 1), labels_t.flatten()).backward()
         warm_opt.step()
         warm_cp = dict(
             model=copy.deepcopy(warm_model.state_dict()),
@@ -361,20 +390,24 @@ def runner_preflight(root=ROOT, lock_name=DEFAULT_LOCK_NAME, check_lock=True, sa
             generator=torch.Generator().manual_seed(11).get_state(),
             position_generator=torch.Generator().manual_seed(12).get_state(),
         )
-        grad_checks = [
-            full_forward_check(warm_cp, factory, x_t, torch.tensor([0, 3, 7, 10]), exp)
-            for exp in (False, True)
-        ]
+        grad_checks = [full_forward_check(warm_cp, factory, x_t, pos_t, exp) for exp in (False, True)]
 
-        frozen_m, frozen_o, _ = restore(warm_cp, factory, frozen=True)
-        ffn_snap = snapshot(frozen_m, frozen_o)
-        pos_t = torch.tensor([0, 3, 7, 10])
-        frozen_o.zero_grad(set_to_none=True)
-        F.cross_entropy(forward(frozen_m, x_t, prefix, pos_t, pos_t)[0].flatten(0, 1), labels_t.flatten()).backward()
-        frozen_o.step()
-        check_frozen(frozen_m, frozen_o, ffn_snap)
+        frozen_pair = {}
+        for exp in (False, True):
+            fm, fo, _ = restore(warm_cp, factory, frozen=True)
+            fsnap = snapshot(fm, fo)
+            fo.zero_grad(set_to_none=True)
+            F.cross_entropy(forward(fm, x_t, prefix, pos_t if exp else None, pos_t)[0].flatten(0, 1),
+                            labels_t.flatten()).backward()
+            fo.step()
+            check_frozen(fm, fo, fsnap)
+            frozen_pair[exp] = (fm, fo)
+        require(any(not torch.equal(v, frozen_pair[True][0].state_dict()[k])
+                    for k, v in frozen_pair[False][0].state_dict().items()),
+                "Self-exposure failed to diverge frozen-FFN step updates")
 
         # Mutate frozen weight and Adam state inside independent audit check -> must fail closed.
+        frozen_m, frozen_o = frozen_pair[True]
         mutated_cp = dict(
             model=copy.deepcopy(frozen_m.state_dict()),
             optimizer=copy.deepcopy(frozen_o.state_dict()),
@@ -404,6 +437,7 @@ def runner_preflight(root=ROOT, lock_name=DEFAULT_LOCK_NAME, check_lock=True, sa
             raise AssertionError("Unauthorized formal run was accepted")
 
     mem_after = process_memory()
+    _check_windows_memory(mem_before, mem_after)
     report = dict(
         passed=True,
         formal_ready=False,
@@ -416,7 +450,8 @@ def runner_preflight(root=ROOT, lock_name=DEFAULT_LOCK_NAME, check_lock=True, sa
             initialized_saved_checkpoint_audited=True,
             supplied_logits_scored=True,
             missing_group_rejected=True,
-            corrupted_generation_and_logits_rejected=True,
+            corrupted_generation_logits_scores_rejected=True,
+            self_exposure_divergence_verified=True,
             frozen_ffn_weight_and_adam_corruption_rejected=True,
             unauthorized_run_rejected=True,
         ),
@@ -453,22 +488,35 @@ def run_formal(
     expected_stage_examples=STAGE_EXAMPLES,
     expected_stage_targets=STAGE_TARGETS,
 ):
-    """Execute authorized C and D continuation from update 6000, then run independent saved-result audit."""
+    """Validate target and preconditions first, then run authorized C/D and independent audit."""
     require_debug_assertions()
+    audit_mod.validate_lock_name(lock_name)
     if authorize is not True:
         raise PermissionError("Formal C/D execution requires explicit authorize=True (--authorize-formal-execution).")
-    if output_name in RESERVED_OUTPUT_NAMES:
+    require(isinstance(output_name, str), "Output directory name must be string")
+    if (output_name.casefold() in RESERVED_OUTPUT_NAMES
+            or output_name.casefold() in audit_mod.WINDOWS_RESERVED_NAMES
+            or output_name.casefold() == lock_name.casefold()):
         raise ValueError(f"Reserved output directory cannot be used for formal runs: {output_name}")
 
     root = Path(root).resolve(strict=True)
     results_root = root / "results"
-    out_dir = fresh_directory(results_root, output_name, root=root)
+    validate_target(results_root, output_name, root=root)
+
+    require(len(expected_stages) >= 1 and type(expected_stage_updates) is int and expected_stage_updates > 0,
+            "Invalid expected stages configuration")
+    prev_chk = 6000
+    for st in expected_stages:
+        require(type(st) is int and st - prev_chk == expected_stage_updates, "Nonuniform stage increment")
+        prev_chk = st
+
     tick = time.perf_counter()
     mem_before = process_memory()
 
     lock_summary = verify_lock_bundle(root=root, lock_name=lock_name)
     lock_path = root / "results" / lock_name / "lock.json"
     lock = decode_json(lock_path.read_text(encoding="utf-8"))
+    require(list(FFN_NAMES) == lock["budget"]["frozen_parameters"], "FFN_NAMES mismatch with locked budget")
 
     if verify_runtime:
         expected_torch = lock["environment"]["torch"]
@@ -483,14 +531,37 @@ def run_formal(
     else:
         protected_hashes = lock["protected_hashes"]
         verify_protected_hashes(root, protected_hashes)
+    verify_protected_hashes(root, lock["study_hashes"])
+    verify_protected_hashes(root, lock["historical_artifact_hashes"])
 
+    execution_code_hashes = {rel: digest(root / rel) for rel in audit_mod.EXECUTION_CODE_FILES}
     pre_report = runner_preflight(root=root, lock_name=lock_name, check_lock=True)
-    write(out_dir / "preflight.json", pre_report)
 
     ab_report_path = root / _norm_rel(f"{CONTINUATION_REL}/report.json")
     require(digest(ab_report_path) == lock["historical_artifact_hashes"][_norm_rel(f"{CONTINUATION_REL}/report.json")],
             "Historical A/B report SHA-256 mismatch")
     ab_report = json.loads(ab_report_path.read_text(encoding="utf-8"))
+    require(ab_report.get("status") == "complete", "Historical A/B report is not complete")
+    require(digest(root / _norm_rel(ab_report["initial"]["scores"])) == ab_report["initial"]["scores_sha256"],
+            "Historical A/B initial scores SHA-256 mismatch")
+    for ab_run in ab_report["runs"]:
+        require(digest(root / _norm_rel(ab_run["evaluation"]["scores"])) == ab_run["evaluation"]["scores_sha256"],
+                f"Historical A/B scores SHA-256 mismatch: {ab_run['evaluation']['scores']}")
+
+    data_raw = json.loads((root / DATA_REL).read_text(encoding="utf-8"))
+    eval_pools = {k: v for k, v in data_raw["pools"].items() if not k.startswith("uniform_")}
+    require(set(eval_pools) == set(expected_counts), "Data pools differ from expected_counts")
+    train_pools = {k: torch.tensor(v) for k, v in eval_pools.items() if k.startswith("train_")}
+
+    start_path = root / START_REL
+    start_sha = digest(start_path)
+    require(start_sha == lock["historical_artifact_hashes"][START_REL], "Start checkpoint SHA-256 mismatch")
+    start_cp = torch.load(start_path, weights_only=True)
+    require(type(start_cp.get("step")) is int and start_cp.get("step") == 6000, "Start checkpoint step must be 6000")
+
+    # Create exclusive output directory only after all pre-execution checks succeed.
+    out_dir = fresh_directory(results_root, output_name, root=root)
+    write(out_dir / "preflight.json", pre_report)
 
     plan = dict(
         lock_sha256=lock_summary["lock_sha256"],
@@ -499,18 +570,12 @@ def run_formal(
         cells=dict(C=lock["budget"]["cells"]["C"], D=lock["budget"]["cells"]["D"]),
         frozen_parameters=list(FFN_NAMES),
         protected_hashes=protected_hashes,
+        execution_code_hashes=execution_code_hashes,
         historical_ab_report_sha256=digest(ab_report_path),
         preflight_sha256=digest(out_dir / "preflight.json"),
     )
     write(out_dir / "plan.json", plan)
 
-    data_raw = json.loads((root / DATA_REL).read_text(encoding="utf-8"))
-    eval_pools = {k: v for k, v in data_raw["pools"].items() if not k.startswith("uniform_")}
-    train_pools = {k: torch.tensor(v) for k, v in eval_pools.items() if k.startswith("train_")}
-
-    start_path = root / START_REL
-    start_sha = digest(start_path)
-    start_cp = torch.load(start_path, weights_only=True)
     start_model, _, _ = restore(start_cp, lambda: make_model("rope"), frozen=True)
     initial_ev = evaluate_and_audit_checkpoint(start_model, eval_pools, out_dir / "3767_frozen_6000_scores.pt", audit_mod)
     initial_record = dict(
@@ -524,6 +589,7 @@ def run_formal(
     init_saved = torch.load(initial_ev["scores"], weights_only=True)
     for pool_name in eval_pools:
         require(torch.equal(init_saved[pool_name]["logits"], hist_init[pool_name]["logits"])
+                and torch.equal(init_saved[pool_name]["scores"], hist_init[pool_name]["scores"])
                 and init_saved[pool_name]["generated"] == hist_init[pool_name]["generated"],
                 f"Initial evaluation mismatch vs historical A/B at {pool_name}")
 
@@ -594,6 +660,8 @@ def run_formal(
         require(torch.equal(stage_pair[0][0]["generator"], stage_pair[1][0]["generator"])
                 and torch.equal(stage_pair[0][0]["position_generator"], stage_pair[1][0]["position_generator"]),
                 f"C/D RNG mismatch at step {stop}")
+        require(not same(stage_pair[0][0]["model"], stage_pair[1][0]["model"]),
+                f"C and D models failed to diverge at step {stop}")
         prev_step = stop
 
     flat_rows = [
@@ -610,10 +678,15 @@ def run_formal(
         writer.writerows(flat_rows)
 
     verify_protected_hashes(root, protected_hashes)
+    verify_protected_hashes(root, execution_code_hashes)
+    verify_protected_hashes(root, lock["study_hashes"])
+    verify_protected_hashes(root, lock["historical_artifact_hashes"])
+
     decision = compute_quartet_decision(
         root, ab_report, report, lock["gates"], expected_stages, expected_counts, eval_pools
     )
     mem_after = process_memory()
+    _check_windows_memory(mem_before, mem_after)
     report.update(
         status="complete",
         formal_updates=sum(r["updates"] for r in report["runs"]),
@@ -670,14 +743,22 @@ def main(argv=None):
                         help="Explicitly authorize formal C/D training updates")
     args = parser.parse_args(argv)
 
+    if args.action != "preflight" and args.save_run_name is not None:
+        parser.error("--save-run-name is only supported with preflight")
+    if args.action != "run" and (args.output_name is not None or args.authorize_formal_execution):
+        parser.error("--output-name and --authorize-formal-execution are only supported with run")
+
+    audit_mod.validate_lock_name(args.lock_name)
     torch.set_num_threads(1)
     torch.use_deterministic_algorithms(True)
 
     if args.action == "preflight":
-        save_dir = None
+        if args.save_run_name is not None:
+            validate_target(ROOT / "results/test_runs", args.save_run_name, root=ROOT)
+        result = runner_preflight(ROOT, lock_name=args.lock_name, check_lock=True, save_dir=None)
         if args.save_run_name is not None:
             save_dir = fresh_directory(ROOT / "results/test_runs", args.save_run_name, root=ROOT)
-        result = runner_preflight(ROOT, lock_name=args.lock_name, check_lock=True, save_dir=save_dir)
+            write(save_dir / "runner_preflight.json", result)
         print(json.dumps(result, indent=2, allow_nan=False))
         return 0
 
@@ -686,6 +767,8 @@ def main(argv=None):
         lock = decode_json((ROOT / "results" / args.lock_name / "lock.json").read_text(encoding="utf-8"))
         runtime_ok = torch.__version__ == lock["environment"]["torch"]
         lineage = verify_historical_lineage(ROOT)
+        verify_protected_hashes(ROOT, lock["historical_artifact_hashes"])
+        verify_protected_hashes(ROOT, lock["protected_hashes"])
         pre = runner_preflight(ROOT, lock_name=args.lock_name, check_lock=True)
         print(json.dumps(dict(
             passed=pre["passed"] and lineage["passed"] and runtime_ok,

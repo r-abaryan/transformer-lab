@@ -9,6 +9,7 @@ on:
       - 'experiments/prepare_copy_decoder_ffn_adaptation.py'
       - 'experiments/run_copy_decoder_ffn_adaptation.py'
       - 'experiments/audit_copy_decoder_ffn_adaptation.py'
+      - 'experiments/validate_copy_exposure_continuation.py'
       - 'results/copy_decoder_ffn_adaptation/**'
       - 'tests/safe_runner.py'
       - 'tests/test_copy_decoder_ffn_adaptation.py'
@@ -24,6 +25,7 @@ on:
       - 'experiments/prepare_copy_decoder_ffn_adaptation.py'
       - 'experiments/run_copy_decoder_ffn_adaptation.py'
       - 'experiments/audit_copy_decoder_ffn_adaptation.py'
+      - 'experiments/validate_copy_exposure_continuation.py'
       - 'results/copy_decoder_ffn_adaptation/**'
       - 'tests/safe_runner.py'
       - 'tests/test_copy_decoder_ffn_adaptation.py'
@@ -93,6 +95,7 @@ jobs:
               paths = ['requirements-cpu.txt', 'docs/protocols/copy-decoder-ffn-adaptation.md',
                   'experiments/copy_decoder_ffn_adaptation.py', 'experiments/prepare_copy_decoder_ffn_adaptation.py',
                   'experiments/run_copy_decoder_ffn_adaptation.py', 'experiments/audit_copy_decoder_ffn_adaptation.py',
+                  'experiments/validate_copy_exposure_continuation.py',
                   'results/copy_decoder_ffn_adaptation/ab_replay_verification.json',
                   'results/copy_decoder_ffn_adaptation/lock.json',
                   'results/copy_decoder_ffn_adaptation/preflight.json',
@@ -127,27 +130,34 @@ jobs:
                   '-p', 'test_copy_decoder_ffn_runner_audit.py', '-v'])
               runner_output = runner_tests.stdout+'\n'+runner_tests.stderr
               runner_match = re.search(r'^Ran (\d+) tests? in ', runner_output, re.MULTILINE)
-              if not runner_match or int(runner_match.group(1)) < 4 or not re.search(r'^OK\s*$', runner_output, re.MULTILINE):
+              if not runner_match or int(runner_match.group(1)) < 7 or not re.search(r'^OK\s*$', runner_output, re.MULTILINE):
                   raise RuntimeError('All synthetic runner/auditor tests must execute without skips or expected failures')
               save('runner_tests.result.json', dict(tests=int(runner_match.group(1)), passed=int(runner_match.group(1)), failures=0, errors=0, skipped=0))
               bundle = execute('verify-lock', [sys.executable, 'experiments/prepare_copy_decoder_ffn_adaptation.py', 'verify-lock'])
               bundle_report = json.loads(bundle.stdout)
               save('verify-lock.json', bundle_report)
               if not (bundle_report.get('passed') is True and bundle_report.get('formal_ready') is False
-                  and bundle_report.get('formal_authorized') is False and bundle_report.get('formal_updates') == 0
+                  and bundle_report.get('formal_authorized') is False
+                  and type(bundle_report.get('formal_updates')) is int and bundle_report.get('formal_updates') == 0
                   and bundle_report.get('ab_replay_eval_cells') == 126 and bundle_report.get('stage_records') == 8):
                   raise RuntimeError('Committed lock bundle contract mismatch')
               runner_pre = execute('runner-preflight', [sys.executable, 'experiments/run_copy_decoder_ffn_adaptation.py', 'preflight'])
               runner_pre_report = json.loads(runner_pre.stdout)
               save('runner-preflight.json', runner_pre_report)
+              runner_checks = runner_pre_report.get('checks', {})
               if not (runner_pre_report.get('passed') is True and runner_pre_report.get('formal_ready') is False
-                  and runner_pre_report.get('formal_authorized') is False and runner_pre_report.get('formal_updates') == 0):
+                  and runner_pre_report.get('formal_authorized') is False
+                  and type(runner_pre_report.get('formal_updates')) is int and runner_pre_report.get('formal_updates') == 0
+                  and runner_pre_report.get('lock_verified') is True and runner_pre_report.get('auditor_reloaded') is True
+                  and isinstance(runner_checks, dict) and bool(runner_checks)
+                  and all(v is True for v in runner_checks.values())):
                   raise RuntimeError('Runner preflight contract mismatch')
               run = execute('preflight', [sys.executable, 'experiments/copy_decoder_ffn_adaptation.py', 'preflight'])
               report = json.loads(run.stdout)
               save('preflight.json', report)
               if not (report.get('passed') is True and report.get('formal_ready') is False
-                  and report.get('formal_updates') == 0 and report.get('fixture_updates') == 17
+                  and type(report.get('formal_updates')) is int and report.get('formal_updates') == 0
+                  and report.get('fixture_updates') == 17
                   and len(report.get('profiles', [])) == 16 and report.get('audit_cells') == 10):
                   raise RuntimeError('Preflight contract mismatch; no formal execution is permitted')
               execute('tracked-diff', ['git', 'diff', '--exit-code', 'HEAD', '--'])
@@ -155,8 +165,8 @@ jobs:
               if status.stdout.strip():
                   raise RuntimeError('Validation left unexpected repository changes')
               save('validation-status.json', dict(initialized_checks_passed=True, formal_ready=False,
-                  formal_updates=0, fixture_updates_per_preflight=17,
-                  limitation='The test suite and CLI each invoke preflight; unit tests add discarded fixture steps. Hosted Windows is not the user laptop. A baseline pass does not establish the requested gradient, sampler or memory improvements.'))
+                  formal_authorized=False, formal_updates=0, fixture_updates_per_preflight=17,
+                  limitation='Preflight, synthetic tests, and committed lock bundle verified only; hosted Windows is not the user laptop, and historical .pt checkpoints are not present on CI. Zero formal C/D updates executed.'))
           finally:
               save('evidence-hashes.json', {str(p.relative_to(evidence)): hashlib.sha256(p.read_bytes()).hexdigest()
                   for p in sorted(evidence.iterdir()) if p.is_file() and p.name != 'evidence-hashes.json'})

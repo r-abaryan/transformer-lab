@@ -178,6 +178,8 @@ def _build_mini_study_workspace(root_dir, stages=(6004,), lock_name="copy_decode
         prev_step = stop
 
     ab_report_path = cont_dir / "report.json"
+    gates_spec_init = dict(short_preservation_min_accuracy=0.99, historical_repair_threshold=0.95)
+    ab_gates = auditor.compute_historical_ab_gates(dict(runs=ab_runs), gates_spec_init, MINI_COUNTS, stages)
     ab_report = dict(
         status="complete",
         initial=dict(
@@ -187,6 +189,7 @@ def _build_mini_study_workspace(root_dir, stages=(6004,), lock_name="copy_decode
             max_reference_error=0.0,
         ),
         runs=ab_runs,
+        gates=ab_gates,
     )
     write(ab_report_path, ab_report)
 
@@ -194,7 +197,11 @@ def _build_mini_study_workspace(root_dir, stages=(6004,), lock_name="copy_decode
         prep.START_REL: start_sha,
         prep.DATA_REL: digest(data_path),
         f"{prep.CONTINUATION_REL}/report.json": digest(ab_report_path),
+        ab_report["initial"]["scores"]: ab_report["initial"]["scores_sha256"],
     }
+    for ab_r in ab_runs:
+        protected[ab_r["checkpoint"]] = ab_r["checkpoint_sha256"]
+        protected[ab_r["evaluation"]["scores"]] = ab_r["evaluation"]["scores_sha256"]
     stage_records = [
         dict(
             arm=arm,
@@ -331,6 +338,14 @@ class FormalRunnerAndAuditTests(unittest.TestCase):
         self.assertNotEqual(bad_audit.returncode, 0)
         self.assertIn("Lock name", bad_audit.stderr)
 
+        for bad_audit_args in (
+            ["--directory", "results/nonexistent", "--diagnostic-cross-runtime"],
+            ["--directory", "results/nonexistent", "--verify-accepted", "--no-save"],
+        ):
+            with self.subTest(bad_audit_args=bad_audit_args):
+                proc = subprocess.run([sys.executable, audit_script, *bad_audit_args], capture_output=True, text=True)
+                self.assertNotEqual(proc.returncode, 0)
+
     def test_preflight_exercises_initialized_audit_and_negative_controls(self):
         res = runner.runner_preflight(root=self.root, check_lock=False)
         self.assertTrue(res["passed"])
@@ -348,14 +363,12 @@ class FormalRunnerAndAuditTests(unittest.TestCase):
                     "formal_cd_mismatch",
                     authorize=True,
                     root=self.root,
-                    verify_runtime=True,
-                    verify_history=False,
                 )
         self.assertFalse((self.root / "results/formal_cd_mismatch").exists())
 
     def test_material_attenuation_and_repair_require_short_preservation(self):
-        meta = _build_mini_study_workspace(self.root)
-        runner.run_formal(
+        meta = _build_mini_study_workspace(self.root, stages=(6004, 6008))
+        runner._run_formal_for_tests(
             "copy_decoder_ffn_gate_test",
             authorize=True,
             root=self.root,
@@ -363,7 +376,7 @@ class FormalRunnerAndAuditTests(unittest.TestCase):
             verify_history=False,
             check_ab_checkpoints=True,
             expected_counts=MINI_COUNTS,
-            expected_stages=(6004,),
+            expected_stages=(6004, 6008),
             expected_stage_updates=4,
             expected_stage_examples=meta["stage_examples"],
             expected_stage_targets=meta["stage_targets"],
@@ -372,7 +385,7 @@ class FormalRunnerAndAuditTests(unittest.TestCase):
         cd_rep = json.loads((out_dir / "report.json").read_text(encoding="utf-8"))
         ab_rep = copy.deepcopy(meta["ab_report"])
 
-        # Set a clean baseline where short copying (6000 and 6004) and long repair gates pass first.
+        # Set a clean baseline where short copying (6000, 6004, 6008) and final long repair gates pass first.
         def set_all_short(metrics_obj, acc):
             for pool in MINI_COUNTS:
                 if int(pool.rsplit("_", 1)[1]) <= 6:
@@ -383,43 +396,81 @@ class FormalRunnerAndAuditTests(unittest.TestCase):
             set_all_short(init_m, 1.0)
         for run_entry in (*ab_rep["runs"], *cd_rep["runs"]):
             set_all_short(run_entry["evaluation"]["metrics"], 1.0)
-        for cell_run in (ab_rep["runs"][1], cd_rep["runs"][0]):
+        ab_8000 = {r["arm"]: r for r in ab_rep["runs"] if r["step"] == 6008}
+        cd_8000 = {r["cell"]: r for r in cd_rep["runs"] if r["step"] == 6008}
+        for cell_run in (ab_8000["both"], cd_8000["C"]):
             for p_name, grp in (("test_8", "distinct"), ("test_8", "repeated"), ("test_10", "repeated")):
                 cell_run["evaluation"]["metrics"][p_name][grp]["exact_accuracy"] = 1.0
                 cell_run["evaluation"]["metrics"][p_name][grp]["on_time_eos"] = 1.0
-        ab_rep["runs"][0]["evaluation"]["metrics"]["test_10"]["all"]["exact_accuracy"] = 0.0
-        ab_rep["runs"][1]["evaluation"]["metrics"]["test_10"]["all"]["exact_accuracy"] = 1.0
-        cd_rep["runs"][0]["evaluation"]["metrics"]["test_10"]["all"]["exact_accuracy"] = 1.0
-        cd_rep["runs"][1]["evaluation"]["metrics"]["test_10"]["all"]["exact_accuracy"] = 1.0
+        ab_8000["cross_only"]["evaluation"]["metrics"]["test_10"]["all"]["exact_accuracy"] = 0.0
+        ab_8000["both"]["evaluation"]["metrics"]["test_10"]["all"]["exact_accuracy"] = 1.0
+        cd_8000["C"]["evaluation"]["metrics"]["test_10"]["all"]["exact_accuracy"] = 1.0
+        cd_8000["D"]["evaluation"]["metrics"]["test_10"]["all"]["exact_accuracy"] = 1.0
 
         gates_spec = json.loads((self.root / "results/copy_decoder_ffn_adaptation/lock.json").read_text(encoding="utf-8"))["gates"]
         dec_ok = runner.compute_quartet_decision(
-            self.root, ab_rep, cd_rep, gates_spec, (6004,), MINI_COUNTS, meta["eval_pools"]
+            self.root, ab_rep, cd_rep, gates_spec, (6004, 6008), MINI_COUNTS, meta["eval_pools"]
         )
         self.assertTrue(dec_ok["primary"]["contrast_threshold_met"])
         self.assertTrue(dec_ok["primary"]["material_attenuation"])
         self.assertTrue(dec_ok["short_preservation"]["passed"])
         self.assertTrue(dec_ok["short_preservation"]["passed_by_cell"]["C"])
+        self.assertTrue(dec_ok["short_preservation"]["final_step_passed_by_cell"]["C"])
         self.assertTrue(dec_ok["historical_repair_passed"]["C"])
 
-        # Now violate ONLY C's short preservation at 6004 and confirm all three dependent gates flip False.
-        cd_rep["runs"][0]["evaluation"]["metrics"]["test_3"]["distinct"]["exact_accuracy"] = 0.50
+        # Intermediate short dip at 6004 with full recovery at 6008:
+        # material_attenuation and short_preservation fail, while final-step historical repair stays True!
+        cd_6004_c = next(r for r in cd_rep["runs"] if r["cell"] == "C" and r["step"] == 6004)
+        cd_6004_c["evaluation"]["metrics"]["test_3"]["distinct"]["exact_accuracy"] = 0.50
+        dec_dip = runner.compute_quartet_decision(
+            self.root, ab_rep, cd_rep, gates_spec, (6004, 6008), MINI_COUNTS, meta["eval_pools"]
+        )
+        dec_dip_aud = auditor._recompute_decision(
+            self.root, ab_rep, cd_rep, gates_spec, (6004, 6008), MINI_COUNTS, meta["eval_pools"]
+        )
+        auditor._strict_close(dec_dip, dec_dip_aud, "decision_intermediate_dip")
+        self.assertTrue(dec_dip["primary"]["contrast_threshold_met"])
+        self.assertFalse(dec_dip["primary"]["material_attenuation"])
+        self.assertFalse(dec_dip["short_preservation"]["passed"])
+        self.assertFalse(dec_dip["short_preservation"]["passed_by_cell"]["C"])
+        self.assertTrue(dec_dip["short_preservation"]["final_step_passed_by_cell"]["C"])
+        self.assertTrue(dec_dip["historical_repair_passed"]["C"])
+
+        # Now violate ONLY C's final-step short preservation at 6008 and confirm historical repair flips False too.
+        cd_6004_c["evaluation"]["metrics"]["test_3"]["distinct"]["exact_accuracy"] = 1.0
+        cd_8000["C"]["evaluation"]["metrics"]["test_3"]["distinct"]["exact_accuracy"] = 0.50
         dec_run = runner.compute_quartet_decision(
-            self.root, ab_rep, cd_rep, gates_spec, (6004,), MINI_COUNTS, meta["eval_pools"]
+            self.root, ab_rep, cd_rep, gates_spec, (6004, 6008), MINI_COUNTS, meta["eval_pools"]
         )
         dec_aud = auditor._recompute_decision(
-            self.root, ab_rep, cd_rep, gates_spec, (6004,), MINI_COUNTS, meta["eval_pools"]
+            self.root, ab_rep, cd_rep, gates_spec, (6004, 6008), MINI_COUNTS, meta["eval_pools"]
         )
         auditor._strict_close(dec_run, dec_aud, "decision")
         self.assertTrue(dec_run["primary"]["contrast_threshold_met"])
         self.assertFalse(dec_run["primary"]["material_attenuation"])
         self.assertFalse(dec_run["short_preservation"]["passed"])
         self.assertFalse(dec_run["short_preservation"]["passed_by_cell"]["C"])
+        self.assertFalse(dec_run["short_preservation"]["final_step_passed_by_cell"]["C"])
         self.assertFalse(dec_run["historical_repair_passed"]["C"])
+
+        # Mismatched archived A/B gates metadata is rejected by validate_ab_report_contract.
+        bad_ab = copy.deepcopy(meta["ab_report"])
+        bad_ab["gates"]["both"]["short_preserved"] = not bad_ab["gates"]["both"]["short_preserved"]
+        with self.assertRaisesRegex(AssertionError, "Historical A/B report gates mismatch"):
+            auditor.validate_ab_report_contract(
+                self.root,
+                bad_ab,
+                gates_spec,
+                MINI_COUNTS,
+                (6004, 6008),
+                4,
+                meta["stage_examples"],
+                meta["stage_targets"],
+            )
 
     def test_synthetic_cd_run_and_independent_audit_with_tamper_controls(self):
         meta = _build_mini_study_workspace(self.root)
-        res = runner.run_formal(
+        res = runner._run_formal_for_tests(
             "copy_decoder_ffn_run_test",
             authorize=True,
             root=self.root,
@@ -433,8 +484,11 @@ class FormalRunnerAndAuditTests(unittest.TestCase):
             expected_stage_targets=meta["stage_targets"],
         )
         self.assertTrue(res["passed"])
+        self.assertTrue(res["accepted"])
         self.assertEqual(res["formal_updates"], 8)
         self.assertTrue(res["audit"]["passed"])
+        self.assertTrue(res["audit"]["formal_acceptance"])
+        self.assertEqual(res["audit"]["audit_scope"], "formal")
         self.assertEqual(res["audit"]["cd_updates"], 8)
         self.assertTrue(res["audit"]["frozen_ffn_bitwise_unchanged"])
 
@@ -449,7 +503,9 @@ class FormalRunnerAndAuditTests(unittest.TestCase):
             expected_stage_updates=4, expected_stage_examples=meta["stage_examples"],
             expected_stage_targets=meta["stage_targets"], verify_lock=True, save=False,
         )
-        self.assertTrue(auditor.audit_directory(out_dir, **audit_args)["passed"])
+        self.assertTrue(auditor._audit_directory_for_tests(out_dir, **audit_args)["passed"])
+        accept_args = {k: v for k, v in audit_args.items() if k != "save"}
+        self.assertTrue(auditor._verify_acceptance_for_tests(out_dir, **accept_args)["accepted"])
 
         report_path = out_dir / "report.json"
         orig_report_bytes = report_path.read_bytes()
@@ -470,7 +526,7 @@ class FormalRunnerAndAuditTests(unittest.TestCase):
         rep["runs"][0]["checkpoint_sha256"] = digest(ckpt_c)
         report_path.write_text(json.dumps(rep), encoding="utf-8")
         with self.assertRaisesRegex(AssertionError, "Frozen decoder FFN parameter moved"):
-            auditor.audit_directory(out_dir, **audit_args)
+            auditor._audit_directory_for_tests(out_dir, **audit_args)
         ckpt_c.write_bytes(orig_ckpt_c)
         report_path.write_bytes(orig_report_bytes)
 
@@ -484,7 +540,7 @@ class FormalRunnerAndAuditTests(unittest.TestCase):
         rep["runs"][0]["checkpoint_sha256"] = digest(ckpt_c)
         report_path.write_text(json.dumps(rep), encoding="utf-8")
         with self.assertRaisesRegex(AssertionError, "Frozen decoder FFN Adam state moved"):
-            auditor.audit_directory(out_dir, **audit_args)
+            auditor._audit_directory_for_tests(out_dir, **audit_args)
         ckpt_c.write_bytes(orig_ckpt_c)
 
         cp_bad_opt = torch.load(ckpt_c, weights_only=True)
@@ -494,7 +550,7 @@ class FormalRunnerAndAuditTests(unittest.TestCase):
         rep["runs"][0]["checkpoint_sha256"] = digest(ckpt_c)
         report_path.write_text(json.dumps(rep), encoding="utf-8")
         with self.assertRaisesRegex(AssertionError, "Frozen decoder FFN Adam state moved"):
-            auditor.audit_directory(out_dir, **audit_args)
+            auditor._audit_directory_for_tests(out_dir, **audit_args)
         ckpt_c.write_bytes(orig_ckpt_c)
         report_path.write_bytes(orig_report_bytes)
 
@@ -519,7 +575,7 @@ class FormalRunnerAndAuditTests(unittest.TestCase):
         rep["metrics_sha256"] = digest(csv_path)
         report_path.write_text(json.dumps(rep), encoding="utf-8")
         with self.assertRaisesRegex(AssertionError, "Numeric mismatch"):
-            auditor.audit_directory(out_dir, **audit_args)
+            auditor._audit_directory_for_tests(out_dir, **audit_args)
         csv_path.write_bytes(orig_csv_bytes)
         report_path.write_bytes(orig_report_bytes)
 
@@ -528,7 +584,7 @@ class FormalRunnerAndAuditTests(unittest.TestCase):
         rep["decision"]["short_preservation"]["passed"] = 1
         report_path.write_text(json.dumps(rep), encoding="utf-8")
         with self.assertRaisesRegex(AssertionError, "Type mismatch"):
-            auditor.audit_directory(out_dir, **audit_args)
+            auditor._audit_directory_for_tests(out_dir, **audit_args)
         report_path.write_bytes(orig_report_bytes)
 
         # 5. Missing metric group in report -> caught!
@@ -536,7 +592,7 @@ class FormalRunnerAndAuditTests(unittest.TestCase):
         rep["runs"][0]["evaluation"]["metrics"]["test_3"].pop("distinct")
         report_path.write_text(json.dumps(rep), encoding="utf-8")
         with self.assertRaisesRegex(AssertionError, "Missing or unexpected group"):
-            auditor.audit_directory(out_dir, **audit_args)
+            auditor._audit_directory_for_tests(out_dir, **audit_args)
         report_path.write_bytes(orig_report_bytes)
 
         # 6. Tamper preflight.json -> caught!
@@ -550,7 +606,7 @@ class FormalRunnerAndAuditTests(unittest.TestCase):
         rep["plan_sha256"] = digest(plan_path)
         report_path.write_text(json.dumps(rep), encoding="utf-8")
         with self.assertRaisesRegex(AssertionError, "Invalid preflight flags"):
-            auditor.audit_directory(out_dir, **audit_args)
+            auditor._audit_directory_for_tests(out_dir, **audit_args)
         pre_path.write_bytes(orig_pre_bytes)
         plan_path.write_bytes(orig_plan_bytes)
         report_path.write_bytes(orig_report_bytes)
@@ -560,7 +616,7 @@ class FormalRunnerAndAuditTests(unittest.TestCase):
         rep["runs"][0]["checkpoint"] = "../../outside.pt"
         report_path.write_text(json.dumps(rep), encoding="utf-8")
         with self.assertRaisesRegex(AssertionError, "escapes containment"):
-            auditor.audit_directory(out_dir, **audit_args)
+            auditor._audit_directory_for_tests(out_dir, **audit_args)
         report_path.write_bytes(orig_report_bytes)
 
         # 8. Lock budget drift -> caught!
@@ -570,7 +626,7 @@ class FormalRunnerAndAuditTests(unittest.TestCase):
         bad_lock["budget"]["decision_step"] = 7500
         lock_path.write_text(json.dumps(bad_lock), encoding="utf-8")
         with self.assertRaisesRegex(AssertionError, "canonical protocol budget"):
-            auditor.audit_directory(out_dir, **audit_args)
+            auditor._audit_directory_for_tests(out_dir, **audit_args)
         lock_path.write_bytes(orig_lock_bytes)
 
     def test_multistage_verify_history_and_containment_controls(self):
@@ -581,7 +637,7 @@ class FormalRunnerAndAuditTests(unittest.TestCase):
             "verify_historical_lineage",
             return_value={"passed": True, "protected_hashes": dict(lock_doc["protected_hashes"])},
         ) as lineage_mock:
-            res = runner.run_formal(
+            res = runner._run_formal_for_tests(
                 "multistage_out",
                 authorize=True,
                 root=self.root,
@@ -597,6 +653,7 @@ class FormalRunnerAndAuditTests(unittest.TestCase):
             )
         lineage_mock.assert_called_once_with(self.root)
         self.assertTrue(res["passed"])
+        self.assertTrue(res["accepted"])
         self.assertEqual(res["formal_updates"], 16)
         self.assertTrue(res["audit"]["passed"])
         self.assertEqual(res["audit"]["cd_updates"], 16)
@@ -637,7 +694,7 @@ class FormalRunnerAndAuditTests(unittest.TestCase):
             check_ab_checkpoints=True,
             save=False,
         )
-        self.assertEqual(auditor.audit_directory(root_raw / "results/multistage_out", **audit_args)["cd_updates"], 16)
+        self.assertEqual(auditor._audit_directory_for_tests(root_raw / "results/multistage_out", **audit_args)["cd_updates"], 16)
 
         if os.name == "nt":
             outside = self.root / "outside_out"
@@ -648,13 +705,13 @@ class FormalRunnerAndAuditTests(unittest.TestCase):
             self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
             self.addCleanup(junction_out.rmdir)
             with self.assertRaisesRegex(ValueError, "reparse-point"):
-                auditor.audit_directory(junction_out, **audit_args)
+                auditor._audit_directory_for_tests(junction_out, **audit_args)
 
         rep = json.loads(orig_report_bytes)
         rep["runs"][0]["checkpoint"] = "results/copy_exposure_continuation/3767_cross_only_6004.pt"
         report_path.write_text(json.dumps(rep), encoding="utf-8")
         with self.assertRaisesRegex(ValueError, "inside output directory"):
-            auditor.audit_directory(out_dir, **audit_args)
+            auditor._audit_directory_for_tests(out_dir, **audit_args)
 
         bad_paths = ["/outside.pt", "\\outside.pt"]
         if os.name == "nt":
@@ -664,7 +721,7 @@ class FormalRunnerAndAuditTests(unittest.TestCase):
             rep["runs"][0]["checkpoint"] = bad_rel
             report_path.write_text(json.dumps(rep), encoding="utf-8")
             with self.assertRaisesRegex(AssertionError, "escapes containment"):
-                auditor.audit_directory(out_dir, **audit_args)
+                auditor._audit_directory_for_tests(out_dir, **audit_args)
         report_path.write_bytes(orig_report_bytes)
 
         bad_pre = json.loads(orig_pre_bytes)
@@ -677,7 +734,7 @@ class FormalRunnerAndAuditTests(unittest.TestCase):
         rep["plan_sha256"] = digest(plan_path)
         report_path.write_text(json.dumps(rep), encoding="utf-8")
         with self.assertRaisesRegex(AssertionError, "Incomplete preflight checks"):
-            auditor.audit_directory(out_dir, **audit_args)
+            auditor._audit_directory_for_tests(out_dir, **audit_args)
         pre_path.write_bytes(orig_pre_bytes)
         plan_path.write_bytes(orig_plan_bytes)
         report_path.write_bytes(orig_report_bytes)
@@ -689,7 +746,7 @@ class FormalRunnerAndAuditTests(unittest.TestCase):
         rep["plan_sha256"] = digest(plan_path)
         report_path.write_text(json.dumps(rep), encoding="utf-8")
         with self.assertRaisesRegex(AssertionError, "Protected file SHA-256 mismatch"):
-            auditor.audit_directory(out_dir, **audit_args)
+            auditor._audit_directory_for_tests(out_dir, **audit_args)
         plan_path.write_bytes(orig_plan_bytes)
         report_path.write_bytes(orig_report_bytes)
 
@@ -697,15 +754,293 @@ class FormalRunnerAndAuditTests(unittest.TestCase):
         rep["environment"]["torch"] = "0.0.0+tampered"
         report_path.write_text(json.dumps(rep), encoding="utf-8")
         with self.assertRaisesRegex(AssertionError, r"Value mismatch at report\.environment\.torch"):
-            auditor.audit_directory(out_dir, **audit_args)
+            auditor._audit_directory_for_tests(out_dir, **audit_args)
         report_path.write_bytes(orig_report_bytes)
 
         rep = json.loads(orig_report_bytes)
         rep["formal_updates"] = 8
         report_path.write_text(json.dumps(rep), encoding="utf-8")
         with self.assertRaisesRegex(AssertionError, "Report formal_updates mismatch"):
-            auditor.audit_directory(out_dir, **audit_args)
+            auditor._audit_directory_for_tests(out_dir, **audit_args)
         report_path.write_bytes(orig_report_bytes)
+
+    def test_public_entrypoints_derive_lock_and_reject_incompatible_config(self):
+        meta = _build_mini_study_workspace(self.root)
+        with self.assertRaises(TypeError):
+            runner.run_formal("override_bad", authorize=True, root=self.root, expected_stages=(6004,))
+        with self.assertRaises(TypeError):
+            runner.run_formal("override_bad", authorize=True, root=self.root, verify_history=False)
+        with self.assertRaises(TypeError):
+            auditor.audit_directory(self.root / "results/missing", root=self.root, expected_stages=(6004,))
+        with self.assertRaises(TypeError):
+            auditor.audit_directory(self.root / "results/missing", root=self.root, verify_lock=False)
+
+        lock_doc = json.loads((self.root / "results/copy_decoder_ffn_adaptation/lock.json").read_text(encoding="utf-8"))
+        bad_budget_lock = copy.deepcopy(lock_doc)
+        bad_budget_lock["budget"]["updates_per_cell"] = 1999
+        with self.assertRaisesRegex(AssertionError, "updates_per_cell"):
+            auditor.derive_locked_schedule(bad_budget_lock)
+
+        # Incompatible fixture schedule, counts, or stage totals must fail before creating output or taking steps.
+        with patch.object(runner, "train_frozen_segment", wraps=runner.train_frozen_segment) as train_mock:
+            with self.assertRaisesRegex(AssertionError, "do not match expected stage schedule"):
+                runner._run_formal_for_tests(
+                    "incompatible_stages",
+                    authorize=True,
+                    root=self.root,
+                    verify_runtime=True,
+                    verify_history=False,
+                    expected_counts=MINI_COUNTS,
+                    expected_stages=(6004, 6008),
+                    expected_stage_updates=4,
+                    expected_stage_examples=meta["stage_examples"],
+                    expected_stage_targets=meta["stage_targets"],
+                )
+            with self.assertRaisesRegex(AssertionError, "segment counts mismatch"):
+                runner._run_formal_for_tests(
+                    "incompatible_examples",
+                    authorize=True,
+                    root=self.root,
+                    verify_runtime=True,
+                    verify_history=False,
+                    expected_counts=MINI_COUNTS,
+                    expected_stages=(6004,),
+                    expected_stage_updates=4,
+                    expected_stage_examples=meta["stage_examples"] + 1,
+                    expected_stage_targets=meta["stage_targets"],
+                )
+            bad_counts = dict(MINI_COUNTS)
+            bad_counts["train_3"] = (7, 9)
+            with self.assertRaisesRegex(AssertionError, "Wrong count"):
+                runner._run_formal_for_tests(
+                    "incompatible_counts",
+                    authorize=True,
+                    root=self.root,
+                    verify_runtime=True,
+                    verify_history=False,
+                    expected_counts=bad_counts,
+                    expected_stages=(6004,),
+                    expected_stage_updates=4,
+                    expected_stage_examples=meta["stage_examples"],
+                    expected_stage_targets=meta["stage_targets"],
+                )
+        train_mock.assert_not_called()
+        for name in ("incompatible_stages", "incompatible_examples", "incompatible_counts"):
+            self.assertFalse((self.root / "results" / name).exists())
+
+    def test_late_audit_failure_blocks_acceptance_and_runtime_enforcement(self):
+        meta = _build_mini_study_workspace(self.root)
+        orig_write = runner.write
+
+        def tamper_csv_right_before_audit(path, payload):
+            orig_write(path, payload)
+            if Path(path).name == "report.json" and isinstance(payload, dict) and payload.get("status") == "completed_unaudited":
+                csv_file = Path(path).parent / "metrics.csv"
+                csv_file.write_bytes(csv_file.read_bytes() + b"#corrupt\n")
+
+        with patch.object(runner, "write", side_effect=tamper_csv_right_before_audit):
+            with self.assertRaisesRegex(AssertionError, "Report metrics_sha256 mismatch"):
+                runner._run_formal_for_tests(
+                    "late_audit_fail",
+                    authorize=True,
+                    root=self.root,
+                    verify_runtime=True,
+                    verify_history=False,
+                    check_ab_checkpoints=True,
+                    expected_counts=MINI_COUNTS,
+                    expected_stages=(6004,),
+                    expected_stage_updates=4,
+                    expected_stage_examples=meta["stage_examples"],
+                    expected_stage_targets=meta["stage_targets"],
+                )
+
+        fail_dir = self.root / "results/late_audit_fail"
+        self.assertFalse((fail_dir / "audit.json").exists())
+        fail_rep = json.loads((fail_dir / "report.json").read_text(encoding="utf-8"))
+        self.assertEqual(fail_rep["status"], "audit_failed")
+        self.assertIn("Report metrics_sha256 mismatch", fail_rep["audit_error"])
+        self.assertEqual(fail_rep["formal_updates"], 8)
+        self.assertEqual(len(fail_rep["runs"]), 2)
+        self.assertIn("primary", fail_rep["decision"])
+        with self.assertRaisesRegex(AssertionError, "missing audit.json"):
+            auditor._verify_acceptance_for_tests(
+                fail_dir,
+                root=self.root,
+                expected_counts=MINI_COUNTS,
+                expected_stages=(6004,),
+                expected_stage_updates=4,
+                expected_stage_examples=meta["stage_examples"],
+                expected_stage_targets=meta["stage_targets"],
+            )
+
+        res = runner._run_formal_for_tests(
+            "good_acceptance_check",
+            authorize=True,
+            root=self.root,
+            verify_runtime=True,
+            verify_history=False,
+            check_ab_checkpoints=True,
+            expected_counts=MINI_COUNTS,
+            expected_stages=(6004,),
+            expected_stage_updates=4,
+            expected_stage_examples=meta["stage_examples"],
+            expected_stage_targets=meta["stage_targets"],
+        )
+        good_dir = self.root / "results/good_acceptance_check"
+        self.assertTrue(res["accepted"])
+        acc = auditor._verify_acceptance_for_tests(
+            good_dir,
+            root=self.root,
+            expected_counts=MINI_COUNTS,
+            expected_stages=(6004,),
+            expected_stage_updates=4,
+            expected_stage_examples=meta["stage_examples"],
+            expected_stage_targets=meta["stage_targets"],
+        )
+        self.assertTrue(acc["accepted"])
+
+        # Completed-but-unaudited directory (missing audit.json) or stale report_sha256 is rejected.
+        audit_path = good_dir / "audit.json"
+        orig_audit_bytes = audit_path.read_bytes()
+        audit_path.unlink()
+        with self.assertRaisesRegex(AssertionError, "missing audit.json"):
+            auditor._verify_acceptance_for_tests(
+                good_dir,
+                root=self.root,
+                expected_counts=MINI_COUNTS,
+                expected_stages=(6004,),
+                expected_stage_updates=4,
+                expected_stage_examples=meta["stage_examples"],
+                expected_stage_targets=meta["stage_targets"],
+                reaudit=False,
+            )
+        audit_path.write_bytes(orig_audit_bytes)
+
+        rep_path = good_dir / "report.json"
+        orig_rep_bytes = rep_path.read_bytes()
+        rep_path.write_bytes(orig_rep_bytes + b"\n")
+        with self.assertRaisesRegex(AssertionError, "report_sha256 does not match"):
+            auditor._verify_acceptance_for_tests(
+                good_dir,
+                root=self.root,
+                expected_counts=MINI_COUNTS,
+                expected_stages=(6004,),
+                expected_stage_updates=4,
+                expected_stage_examples=meta["stage_examples"],
+                expected_stage_targets=meta["stage_targets"],
+                reaudit=False,
+            )
+        rep_path.write_bytes(orig_rep_bytes)
+
+        # Standalone auditor live runtime checks and diagnostic cross-runtime boundaries.
+        audit_args = dict(
+            root=self.root,
+            expected_counts=MINI_COUNTS,
+            expected_stages=(6004,),
+            expected_stage_updates=4,
+            expected_stage_examples=meta["stage_examples"],
+            expected_stage_targets=meta["stage_targets"],
+            verify_lock=True,
+            check_ab_checkpoints=True,
+        )
+        with patch.object(auditor.torch, "__version__", "0.0.0-mismatch"):
+            with self.assertRaisesRegex(AssertionError, "Auditor torch"):
+                auditor._audit_directory_for_tests(good_dir, save=False, **audit_args)
+            with self.assertRaisesRegex(AssertionError, "Diagnostic cross-runtime audit cannot save"):
+                auditor._audit_directory_for_tests(good_dir, save=True, diagnostic_cross_runtime=True, **audit_args)
+            diag = auditor._audit_directory_for_tests(good_dir, save=False, diagnostic_cross_runtime=True, **audit_args)
+            self.assertTrue(diag["passed"])
+            self.assertFalse(diag["formal_acceptance"])
+            self.assertFalse(diag["runtime_matches_locked_torch"])
+            self.assertEqual(diag["audit_scope"], "diagnostic_cross_runtime")
+            self.assertEqual(diag["audit_environment"]["torch"], "0.0.0-mismatch")
+
+        try:
+            torch.set_num_threads(2)
+            with self.assertRaisesRegex(AssertionError, "live threads"):
+                auditor._audit_directory_for_tests(good_dir, save=False, **audit_args)
+        finally:
+            torch.set_num_threads(1)
+
+    def test_stage_boundary_aborts_before_next_stage_starts(self):
+        meta = _build_mini_study_workspace(self.root, stages=(6004, 6008))
+        cont_ckpt = self.root / prep.CONTINUATION_REL / "3767_cross_only_6004.pt"
+        cp_bad = torch.load(cont_ckpt, weights_only=True)
+        cp_bad["position_generator"][0] ^= 1
+        torch.save(cp_bad, cont_ckpt)
+        bad_sha = digest(cont_ckpt)
+
+        rel_ckpt = f"{prep.CONTINUATION_REL}/3767_cross_only_6004.pt"
+        ab_rep = json.loads(meta["ab_report_path"].read_text(encoding="utf-8"))
+        for run in ab_rep["runs"]:
+            if run["arm"] == "cross_only" and run["step"] == 6004:
+                run["checkpoint_sha256"] = bad_sha
+        write(meta["ab_report_path"], ab_rep)
+        rep_sha = digest(meta["ab_report_path"])
+
+        lock_dir = self.root / "results/copy_decoder_ffn_adaptation"
+        ab_ver_path = lock_dir / "ab_replay_verification.json"
+        ab_ver = json.loads(ab_ver_path.read_text(encoding="utf-8"))
+        for manifest_key in ("artifact_hashes", "protected_hashes"):
+            ab_ver[manifest_key][rel_ckpt] = bad_sha
+            ab_ver[manifest_key][f"{prep.CONTINUATION_REL}/report.json"] = rep_sha
+        write(ab_ver_path, ab_ver)
+
+        lock_path = lock_dir / "lock.json"
+        lock_doc = json.loads(lock_path.read_text(encoding="utf-8"))
+        for manifest_key in ("historical_artifact_hashes", "protected_hashes"):
+            lock_doc[manifest_key][rel_ckpt] = bad_sha
+            lock_doc[manifest_key][f"{prep.CONTINUATION_REL}/report.json"] = rep_sha
+        lock_doc["verification_artifacts"][f"results/copy_decoder_ffn_adaptation/ab_replay_verification.json"] = digest(ab_ver_path)
+        write(lock_path, lock_doc)
+
+        with patch.object(runner, "train_frozen_segment", wraps=runner.train_frozen_segment) as train_mock:
+            with self.assertRaisesRegex(AssertionError, "Saved RNG state diverged from historical A/B checkpoint at C@6004"):
+                runner._run_formal_for_tests(
+                    "stage_rng_abort",
+                    authorize=True,
+                    root=self.root,
+                    verify_runtime=True,
+                    verify_history=False,
+                    check_ab_checkpoints=True,
+                    expected_counts=MINI_COUNTS,
+                    expected_stages=(6004, 6008),
+                    expected_stage_updates=4,
+                    expected_stage_examples=meta["stage_examples"],
+                    expected_stage_targets=meta["stage_targets"],
+                )
+        self.assertTrue(all(call.args[6] == 6004 for call in train_mock.call_args_list))
+        self.assertFalse(any(call.args[6] == 6008 for call in train_mock.call_args_list))
+        self.assertFalse((self.root / "results/stage_rng_abort/3767_C_cross_only_6008.pt").exists())
+        self.assertFalse((self.root / "results/stage_rng_abort/3767_D_both_6008.pt").exists())
+
+        # Accounting mismatch returned inside stage 1 also aborts before stage 2 runs.
+        with tempfile.TemporaryDirectory(prefix="copy-ffn-acct-") as tmp2:
+            root2 = Path(tmp2).resolve(strict=True)
+            meta2 = _build_mini_study_workspace(root2, stages=(6004, 6008))
+            orig_train = runner.train_frozen_segment
+
+            def bad_accounting(*args, **kwargs):
+                stream_hex, pstream_hex, _ex, tgt, cp = orig_train(*args, **kwargs)
+                return stream_hex, pstream_hex, 1, tgt, cp
+
+            with patch.object(runner, "train_frozen_segment", side_effect=bad_accounting) as mock2:
+                with self.assertRaisesRegex(AssertionError, "Segment accounting mismatch at C@6004"):
+                    runner._run_formal_for_tests(
+                        "stage_acct_abort",
+                        authorize=True,
+                        root=root2,
+                        verify_runtime=True,
+                        verify_history=False,
+                        check_ab_checkpoints=True,
+                        expected_counts=MINI_COUNTS,
+                        expected_stages=(6004, 6008),
+                        expected_stage_updates=4,
+                        expected_stage_examples=meta2["stage_examples"],
+                        expected_stage_targets=meta2["stage_targets"],
+                    )
+            self.assertEqual(len(mock2.call_args_list), 1)
+            self.assertFalse((root2 / "results/stage_acct_abort/3767_C_cross_only_6008.pt").exists())
 
 
 if __name__ == "__main__":

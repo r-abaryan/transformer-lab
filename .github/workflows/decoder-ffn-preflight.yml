@@ -130,7 +130,7 @@ jobs:
                   '-p', 'test_copy_decoder_ffn_runner_audit.py', '-v'])
               runner_output = runner_tests.stdout+'\n'+runner_tests.stderr
               runner_match = re.search(r'^Ran (\d+) tests? in ', runner_output, re.MULTILINE)
-              if not runner_match or int(runner_match.group(1)) < 7 or not re.search(r'^OK\s*$', runner_output, re.MULTILINE):
+              if not runner_match or int(runner_match.group(1)) < 10 or not re.search(r'^OK\s*$', runner_output, re.MULTILINE):
                   raise RuntimeError('All synthetic runner/auditor tests must execute without skips or expected failures')
               save('runner_tests.result.json', dict(tests=int(runner_match.group(1)), passed=int(runner_match.group(1)), failures=0, errors=0, skipped=0))
               bundle = execute('verify-lock', [sys.executable, 'experiments/prepare_copy_decoder_ffn_adaptation.py', 'verify-lock'])

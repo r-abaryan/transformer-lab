@@ -5,11 +5,11 @@ import csv
 import hashlib
 import importlib
 import json
-import platform
 import struct
 import sys
 import tempfile
 import time
+from dataclasses import dataclass, field
 from pathlib import Path
 
 import torch
@@ -129,6 +129,9 @@ def compute_quartet_decision(root, ab_report, cd_report, gates_spec, stages, exp
     }
 
     short_pools = [p for p in expected_counts if int(p.rsplit("_", 1)[1]) <= 6]
+    if "short_preservation_pools" in gates_spec:
+        require(set(short_pools) == set(gates_spec["short_preservation_pools"]),
+                "Short preservation pools mismatch")
     ab_lookup = {(r["arm"], r["step"]): r["evaluation"]["metrics"] for r in ab_report["runs"]}
     cd_lookup = {(r["cell"], r["step"]): r["evaluation"]["metrics"] for r in cd_report["runs"]}
     short_failures = []
@@ -155,6 +158,16 @@ def compute_quartet_decision(root, ab_report, cd_report, gates_spec, stages, exp
                         short_passed_by_cell[cell_name] = False
                         short_failures.append(dict(cell=cell_name, step=step, pool=pool_name, group=grp, exact_accuracy=val))
 
+    final_short_ok = {
+        c: all(
+            runs_final[c]["evaluation"]["metrics"][pool_name][grp]["exact_accuracy"]
+            >= gates_spec["short_preservation_min_accuracy"]
+            for pool_name in short_pools
+            for grp in ("distinct", "repeated")
+        )
+        for c in ("A", "B", "C", "D")
+    }
+
     gen8 = {
         c: torch.load(root / _norm_rel(r["evaluation"]["scores"]), weights_only=True)["test_8"]["generated"]
         for c, r in runs_final.items()
@@ -177,7 +190,7 @@ def compute_quartet_decision(root, ab_report, cd_report, gates_spec, stages, exp
         )
 
     repair = {
-        c: short_passed_by_cell[c] and all(
+        c: final_short_ok[c] and all(
             runs_final[c]["evaluation"]["metrics"][pool][grp][metric] >= gates_spec["historical_repair_threshold"]
             for pool, grp in (("test_8", "distinct"), ("test_8", "repeated"), ("test_10", "repeated"))
             for metric in ("exact_accuracy", "on_time_eos")
@@ -203,6 +216,7 @@ def compute_quartet_decision(root, ab_report, cd_report, gates_spec, stages, exp
             worst_accuracy=worst_short,
             passed=not short_failures,
             passed_by_cell=short_passed_by_cell,
+            final_step_passed_by_cell=final_short_ok,
             failures=short_failures,
         ),
         secondary_length8=len8,
@@ -458,15 +472,7 @@ def runner_preflight(root=ROOT, lock_name=DEFAULT_LOCK_NAME, check_lock=True, sa
         gradient_checks=grad_checks,
         memory=dict(before=mem_before, after=mem_after),
         seconds=time.perf_counter() - tick,
-        environment=dict(
-            python=sys.version,
-            torch=torch.__version__,
-            platform=platform.platform(),
-            threads=torch.get_num_threads(),
-            deterministic_algorithms=torch.are_deterministic_algorithms_enabled(),
-            dtype="float64",
-            device="cpu",
-        ),
+        environment=audit_mod.collect_runtime_environment(),
         limitation="Pre-execution runner/auditor contract check only; zero formal training updates.",
     )
     if save_dir is not None:
@@ -474,21 +480,26 @@ def runner_preflight(root=ROOT, lock_name=DEFAULT_LOCK_NAME, check_lock=True, sa
     return report
 
 
-def run_formal(
+@dataclass(frozen=True)
+class _RunnerOverrides:
+    verify_runtime: bool = True
+    verify_history: bool = True
+    check_ab_checkpoints: bool = True
+    expected_counts: dict[str, tuple[int, int]] = field(default_factory=lambda: dict(COUNTS))
+    expected_stages: tuple[int, ...] = STAGES
+    expected_stage_updates: int = STAGE_UPDATES
+    expected_stage_examples: int = STAGE_EXAMPLES
+    expected_stage_targets: int = STAGE_TARGETS
+
+
+def _run_formal_impl(
     output_name,
     authorize=False,
     root=ROOT,
     lock_name=DEFAULT_LOCK_NAME,
-    verify_runtime=True,
-    verify_history=True,
-    check_ab_checkpoints=True,
-    expected_counts=COUNTS,
-    expected_stages=STAGES,
-    expected_stage_updates=STAGE_UPDATES,
-    expected_stage_examples=STAGE_EXAMPLES,
-    expected_stage_targets=STAGE_TARGETS,
+    overrides=None,
 ):
-    """Validate target and preconditions first, then run authorized C/D and independent audit."""
+    """Validate lock, configuration, history, and preflight first, then run authorized C/D and independent audit."""
     require_debug_assertions()
     audit_mod.validate_lock_name(lock_name)
     if authorize is not True:
@@ -503,13 +514,6 @@ def run_formal(
     results_root = root / "results"
     validate_target(results_root, output_name, root=root)
 
-    require(len(expected_stages) >= 1 and type(expected_stage_updates) is int and expected_stage_updates > 0,
-            "Invalid expected stages configuration")
-    prev_chk = 6000
-    for st in expected_stages:
-        require(type(st) is int and st - prev_chk == expected_stage_updates, "Nonuniform stage increment")
-        prev_chk = st
-
     tick = time.perf_counter()
     mem_before = process_memory()
 
@@ -518,12 +522,37 @@ def run_formal(
     lock = decode_json(lock_path.read_text(encoding="utf-8"))
     require(list(FFN_NAMES) == lock["budget"]["frozen_parameters"], "FFN_NAMES mismatch with locked budget")
 
+    if overrides is None:
+        sched = audit_mod.derive_locked_schedule(lock, COUNTS)
+        verify_runtime = True
+        verify_history = True
+        check_ab_checkpoints = True
+        expected_counts = sched["counts"]
+        expected_stages = sched["stages"]
+        expected_stage_updates = sched["stage_updates"]
+        expected_stage_examples = sched["stage_examples"]
+        expected_stage_targets = sched["stage_targets"]
+    else:
+        verify_runtime = overrides.verify_runtime
+        verify_history = overrides.verify_history
+        check_ab_checkpoints = overrides.check_ab_checkpoints
+        expected_counts = overrides.expected_counts
+        expected_stages = tuple(overrides.expected_stages)
+        expected_stage_updates = overrides.expected_stage_updates
+        expected_stage_examples = overrides.expected_stage_examples
+        expected_stage_targets = overrides.expected_stage_targets
+        audit_mod._validate_fixture_schedule(
+            expected_counts, expected_stages, expected_stage_updates,
+            expected_stage_examples, expected_stage_targets,
+        )
+
     if verify_runtime:
         expected_torch = lock["environment"]["torch"]
         require(torch.__version__ == expected_torch,
                 f"Runtime torch {torch.__version__} != locked historical A/B replay torch {expected_torch}")
-        require(torch.get_num_threads() == 1 and torch.are_deterministic_algorithms_enabled(),
-                "Formal run requires 1 CPU thread and deterministic algorithms enabled")
+        require(torch.get_num_threads() == lock["budget"]["threads"]
+                and torch.are_deterministic_algorithms_enabled() is lock["budget"]["deterministic_algorithms"],
+                "Formal run requires locked CPU thread count and deterministic algorithms setting")
 
     if verify_history:
         lineage = verify_historical_lineage(root)
@@ -534,23 +563,26 @@ def run_formal(
     verify_protected_hashes(root, lock["study_hashes"])
     verify_protected_hashes(root, lock["historical_artifact_hashes"])
 
-    execution_code_hashes = {rel: digest(root / rel) for rel in audit_mod.EXECUTION_CODE_FILES}
-    pre_report = runner_preflight(root=root, lock_name=lock_name, check_lock=True)
-
     ab_report_path = root / _norm_rel(f"{CONTINUATION_REL}/report.json")
     require(digest(ab_report_path) == lock["historical_artifact_hashes"][_norm_rel(f"{CONTINUATION_REL}/report.json")],
             "Historical A/B report SHA-256 mismatch")
     ab_report = json.loads(ab_report_path.read_text(encoding="utf-8"))
-    require(ab_report.get("status") == "complete", "Historical A/B report is not complete")
-    require(digest(root / _norm_rel(ab_report["initial"]["scores"])) == ab_report["initial"]["scores_sha256"],
-            "Historical A/B initial scores SHA-256 mismatch")
-    for ab_run in ab_report["runs"]:
-        require(digest(root / _norm_rel(ab_run["evaluation"]["scores"])) == ab_run["evaluation"]["scores_sha256"],
-                f"Historical A/B scores SHA-256 mismatch: {ab_run['evaluation']['scores']}")
+    audit_mod.validate_ab_report_contract(
+        root,
+        ab_report,
+        lock["gates"],
+        expected_counts,
+        expected_stages,
+        expected_stage_updates,
+        expected_stage_examples,
+        expected_stage_targets,
+        expected_hist_hashes=lock["historical_artifact_hashes"] if check_ab_checkpoints else None,
+    )
 
     data_raw = json.loads((root / DATA_REL).read_text(encoding="utf-8"))
     eval_pools = {k: v for k, v in data_raw["pools"].items() if not k.startswith("uniform_")}
-    require(set(eval_pools) == set(expected_counts), "Data pools differ from expected_counts")
+    require(digest(root / DATA_REL) == lock["historical_artifact_hashes"][DATA_REL], "Data SHA-256 mismatch")
+    audit_mod.validate_data_pools(eval_pools, expected_counts=expected_counts)
     train_pools = {k: torch.tensor(v) for k, v in eval_pools.items() if k.startswith("train_")}
 
     start_path = root / START_REL
@@ -558,6 +590,10 @@ def run_formal(
     require(start_sha == lock["historical_artifact_hashes"][START_REL], "Start checkpoint SHA-256 mismatch")
     start_cp = torch.load(start_path, weights_only=True)
     require(type(start_cp.get("step")) is int and start_cp.get("step") == 6000, "Start checkpoint step must be 6000")
+    audit_mod.capture_ffn_snapshot(start_cp)
+
+    execution_code_hashes = {rel: digest(root / rel) for rel in audit_mod.EXECUTION_CODE_FILES}
+    pre_report = runner_preflight(root=root, lock_name=lock_name, check_lock=True)
 
     # Create exclusive output directory only after all pre-execution checks succeed.
     out_dir = fresh_directory(results_root, output_name, root=root)
@@ -623,8 +659,22 @@ def run_formal(
                 st["model"], st["opt"], st["gen"], st["pg"],
                 train_pools, prev_step, stop, arm, start_ffn_snapshots[cell],
             )
+            seg_updates = stop - prev_step
+            require(seg_updates == expected_stage_updates == ab_stage[arm]["updates"]
+                    and examples == expected_stage_examples == ab_stage[arm]["examples"]
+                    and targets_count == expected_stage_targets == ab_stage[arm]["active_targets"],
+                    f"Segment accounting mismatch at {cell}@{stop}")
             require(stream_hex == ab_stage[arm]["stream"] and pstream_hex == ab_stage[arm]["position_stream"],
                     f"Paired stream mismatch against historical A/B at {cell}@{stop}")
+            if check_ab_checkpoints:
+                ab_ckpt_rel = _norm_rel(ab_stage[arm]["checkpoint"])
+                ab_ckpt_path = root / ab_ckpt_rel
+                require(digest(ab_ckpt_path) == ab_stage[arm]["checkpoint_sha256"],
+                        f"Historical A/B checkpoint SHA-256 mismatch: {ab_ckpt_rel}")
+                ab_cp = torch.load(ab_ckpt_path, weights_only=True)
+                require(torch.equal(cp["generator"], ab_cp["generator"])
+                        and torch.equal(cp["position_generator"], ab_cp["position_generator"]),
+                        f"Saved RNG state diverged from historical A/B checkpoint at {cell}@{stop}")
 
             ckpt_path = out_dir / f"3767_{cell}_{arm}_{stop}.pt"
             require(not ckpt_path.exists(), f"Refusing to overwrite checkpoint: {ckpt_path}")
@@ -642,7 +692,7 @@ def run_formal(
                 checkpoint_sha256=digest(ckpt_path),
                 stream=stream_hex,
                 position_stream=pstream_hex,
-                updates=stop - prev_step,
+                updates=seg_updates,
                 examples=examples,
                 active_targets=targets_count,
                 evaluation=dict(
@@ -685,48 +735,121 @@ def run_formal(
     decision = compute_quartet_decision(
         root, ab_report, report, lock["gates"], expected_stages, expected_counts, eval_pools
     )
+    for cell, arm in (("A", "cross_only"), ("B", "both")):
+        require(decision["historical_repair_passed"][cell] == ab_report["gates"][arm]["repair"],
+                f"Quartet historical_repair_passed[{cell}] diverged from historical A/B report gates")
+
     mem_after = process_memory()
     _check_windows_memory(mem_before, mem_after)
     report.update(
-        status="complete",
+        status="completed_unaudited",
+        acceptance_policy="Formal acceptance requires audit.json with passed=true, formal_acceptance=true, and report_sha256 matching this file.",
         formal_updates=sum(r["updates"] for r in report["runs"]),
         decision=decision,
         metrics_sha256=digest(csv_path),
         memory=dict(before=mem_before, after=mem_after),
         seconds=time.perf_counter() - tick,
         protected_files=len(protected_hashes),
-        environment=dict(
-            python=sys.version,
-            torch=torch.__version__,
-            platform=platform.platform(),
-            threads=torch.get_num_threads(),
-            deterministic_algorithms=torch.are_deterministic_algorithms_enabled(),
-            dtype="float64",
-            device="cpu",
-        ),
+        environment=audit_mod.collect_runtime_environment(),
     )
     write(out_dir / "report.json", report)
 
-    audit_summary = audit_mod.audit_directory(
-        out_dir,
-        root=root,
-        lock_name=lock_name,
-        ab_report_rel=f"{CONTINUATION_REL}/report.json",
-        expected_counts=expected_counts,
-        expected_stages=expected_stages,
-        expected_stage_updates=expected_stage_updates,
-        expected_stage_examples=expected_stage_examples,
-        expected_stage_targets=expected_stage_targets,
-        verify_lock=True,
-        check_ab_checkpoints=check_ab_checkpoints,
-        save=True,
-    )
+    try:
+        if overrides is None:
+            audit_summary = audit_mod.audit_directory(
+                out_dir, root=root, lock_name=lock_name, save=True, diagnostic_cross_runtime=False
+            )
+            acceptance = audit_mod.verify_acceptance(
+                out_dir, root=root, lock_name=lock_name, reaudit=False
+            )
+        else:
+            audit_summary = audit_mod._audit_directory_for_tests(
+                out_dir,
+                root=root,
+                lock_name=lock_name,
+                ab_report_rel=f"{CONTINUATION_REL}/report.json",
+                expected_counts=expected_counts,
+                expected_stages=expected_stages,
+                expected_stage_updates=expected_stage_updates,
+                expected_stage_examples=expected_stage_examples,
+                expected_stage_targets=expected_stage_targets,
+                verify_lock=True,
+                check_ab_checkpoints=check_ab_checkpoints,
+                save=True,
+                diagnostic_cross_runtime=False,
+            )
+            acceptance = audit_mod._verify_acceptance_for_tests(
+                out_dir,
+                root=root,
+                lock_name=lock_name,
+                ab_report_rel=f"{CONTINUATION_REL}/report.json",
+                expected_counts=expected_counts,
+                expected_stages=expected_stages,
+                expected_stage_updates=expected_stage_updates,
+                expected_stage_examples=expected_stage_examples,
+                expected_stage_targets=expected_stage_targets,
+                verify_lock=True,
+                check_ab_checkpoints=check_ab_checkpoints,
+                reaudit=False,
+            )
+    except Exception as exc:
+        report["status"] = "audit_failed"
+        report["audit_error"] = f"{type(exc).__name__}: {exc}"
+        write(out_dir / "report.json", report)
+        raise
+
     return dict(
         passed=True,
+        accepted=acceptance["accepted"],
         output_directory=_audit_dir_relative(out_dir, root),
         formal_updates=report["formal_updates"],
+        report_sha256=acceptance["report_sha256"],
+        audit_sha256=acceptance["audit_sha256"],
         decision=decision,
         audit=audit_summary,
+    )
+
+
+def run_formal(output_name, authorize=False, root=ROOT, lock_name=DEFAULT_LOCK_NAME):
+    """Execute authorized formal C/D strictly under verified locked schedule and environment."""
+    return _run_formal_impl(
+        output_name,
+        authorize=authorize,
+        root=root,
+        lock_name=lock_name,
+        overrides=None,
+    )
+
+
+def _run_formal_for_tests(
+    output_name,
+    authorize=False,
+    root=ROOT,
+    lock_name=DEFAULT_LOCK_NAME,
+    verify_runtime=True,
+    verify_history=True,
+    check_ab_checkpoints=True,
+    expected_counts=COUNTS,
+    expected_stages=STAGES,
+    expected_stage_updates=STAGE_UPDATES,
+    expected_stage_examples=STAGE_EXAMPLES,
+    expected_stage_targets=STAGE_TARGETS,
+):
+    return _run_formal_impl(
+        output_name,
+        authorize=authorize,
+        root=root,
+        lock_name=lock_name,
+        overrides=_RunnerOverrides(
+            verify_runtime=verify_runtime,
+            verify_history=verify_history,
+            check_ab_checkpoints=check_ab_checkpoints,
+            expected_counts=dict(expected_counts),
+            expected_stages=tuple(expected_stages),
+            expected_stage_updates=expected_stage_updates,
+            expected_stage_examples=expected_stage_examples,
+            expected_stage_targets=expected_stage_targets,
+        ),
     )
 
 
@@ -794,8 +917,6 @@ def main(argv=None):
         authorize=args.authorize_formal_execution,
         root=ROOT,
         lock_name=args.lock_name,
-        verify_runtime=True,
-        verify_history=True,
     )
     print(json.dumps(result, indent=2, allow_nan=False))
     return 0
